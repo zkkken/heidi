@@ -1,0 +1,48 @@
+# ============================================
+# EMR to Heidi Integration - 混合方案
+# Phase 1: 独立 MVP + Phase 2/3 扩展准备
+# Python 3.10+
+# ============================================
+
+# -------------------- Phase 1: 核心依赖 --------------------
+# 截图相关
+pyautogui==0.9.54
+
+# 图像处理
+Pillow==10.0.0
+
+# OCR 引擎
+paddleocr==2.7.0.3
+
+# HTTP 请求
+requests==2.31.0
+
+# 环境变量管理
+python-dotenv==1.0.0
+
+# 终端美化输出
+rich==13.7.0
+
+# 配置文件解析
+pyyaml==6.0.1
+
+# -------------------- Phase 2: OOTB 能力复用（可选）--------------------
+# 多屏幕支持
+screeninfo==0.8.1
+
+# macOS 屏幕支持（仅 macOS）
+# pyobjc-framework-Quartz==10.1  # 在 macOS 上取消注释
+
+# -------------------- Phase 3: OOTB 集成（可选）--------------------
+# 集成到 OOTB 时需要安装 OOTB 的完整依赖
+# 请参考 /path/to/computer_use_ootb-main/requirements.txt
+
+# -------------------- RPA 自动化扩展（Phase 4）--------------------
+# 剪贴板操作
+pyperclip==1.8.2
+
+# 窗口管理
+pygetwindow==0.0.9
+
+# 高级鼠标键盘控制
+pynput==1.7.6
