@@ -112,6 +112,10 @@ class HeidiClient:
             "User-Agent": "EMR-Heidi-Integration/1.0"
         })
 
+    def _join_url(self, path: str) -> str:
+        """安全拼接 URL，避免重复斜杠/路径"""
+        return f"{self.base_url.rstrip('/')}/{path.lstrip('/')}"
+
     def authenticate(self,
                      email: Optional[str] = None,
                      internal_id: Optional[int] = None,
@@ -141,7 +145,7 @@ class HeidiClient:
         internal_id = internal_id or HEIDI_AUTH_INTERNAL_ID
 
         # 官方文档路径: /jwt
-        auth_url = f"{self.base_url}/jwt"
+        auth_url = self._join_url("/jwt")
 
         # 官方文档要求的参数 (GET Query Params)
         params = {
@@ -282,54 +286,38 @@ class HeidiClient:
 
     def get_patient_profile_by_ehr_id(self, ehr_patient_id: str) -> Optional[Dict[str, Any]]:
         """
-        根据 EHR patient ID 查询 patient profile
-
-        参数:
-            ehr_patient_id: EMR 系统中的病人 ID
-
-        返回:
-            Dict: Patient profile 数据，如果不存在返回 None
-
-        注意:
-            - TODO: 根据 Heidi API 文档调整接口路径和参数
-            - 当前假设接口为 GET /patient-profiles?ehr_patient_id=xxx
+        根据 EHR ID 查询病人档案
+        Endpoint: GET /patient-profiles
         """
         try:
-            # TODO: 根据实际 API 文档调整接口路径
+            # 修正：直接使用 /patient-profiles
             result = self._make_api_request(
                 method="GET",
                 endpoint="/patient-profiles",
                 params={"ehr_patient_id": ehr_patient_id}
             )
 
-            # 假设响应格式为 {"data": [...]} 或 {"patient_profiles": [...]}
+            # 兼容不同的响应结构
             profiles = result.get("data") or result.get("patient_profiles") or []
-
-            if profiles:
-                return profiles[0]  # 返回第一个匹配的 profile
-
+            if isinstance(profiles, list) and len(profiles) > 0:
+                return profiles[0]
             return None
 
         except HeidiAPIError as e:
+            # 如果是 404 说明没找到病人，返回 None 即可，不算程序错误
+            if "404" in str(e):
+                return None
             if DEBUG_MODE:
-                print(f"⚠️  查询 patient profile 失败: {str(e)}")
+                print(f"⚠️ 查询病人失败: {e}")
             return None
 
     def create_patient_profile(self, patient_data: PatientProfile) -> Dict[str, Any]:
         """
-        创建新的 patient profile
-
-        参数:
-            patient_data: PatientProfile 对象
-
-        返回:
-            Dict: 创建结果，包含 patient_profile_id
-
-        异常:
-            HeidiPatientProfileError: 创建失败
+        创建病人档案
+        Endpoint: POST /patient-profiles
         """
         try:
-            # TODO: 根据实际 API 文档调整接口路径
+            # 修正：直接使用 /patient-profiles
             result = self._make_api_request(
                 method="POST",
                 endpoint="/patient-profiles",
@@ -337,15 +325,14 @@ class HeidiClient:
             )
 
             if DEBUG_MODE:
-                profile_id = result.get("id") or result.get("patient_profile_id")
-                print(f"✅ Patient profile 创建成功: ID={profile_id}")
-
+                # 尝试获取 ID，兼容不同的返回字段
+                p_id = result.get('id') or result.get('patient_profile_id')
+                print(f"✅ 创建成功: {p_id}")
             return result
 
         except HeidiAPIError as e:
-            raise HeidiPatientProfileError(
-                f"创建 patient profile 失败: {str(e)}"
-            ) from e
+            # 这里抛出异常，交给上层处理 (比如 rpa_main.py)
+            raise HeidiPatientProfileError(f"创建失败: {e}") from e
 
     def update_patient_profile(self,
                                profile_id: str,
@@ -450,59 +437,6 @@ class HeidiClient:
     def close(self):
         """关闭会话（释放资源）"""
         self.session.close()
-
-    def create_patient(self, patient_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """
-        针对演示快速创建病人（与 demo_careflow.py 配合）
-        参数示例:
-            {
-                "first_name": "Diana",
-                "last_name": "Rossi",
-                "birth_date": "03/04/1998",
-                "gender": "Female",
-                "phone": "0412345678"
-            }
-        """
-        if not self.jwt_token:
-            self.authenticate()
-
-        url = f"{self.base_url}/api/v1/patients"
-        headers = {
-            "Authorization": f"Bearer {self.jwt_token}",
-            "Content-Type": "application/json"
-        }
-
-        payload = {
-            "first_name": patient_data.get("first_name"),
-            "last_name": patient_data.get("last_name"),
-            # 演示接口假定 dob 字段；如果 API 不同可在此调整
-            "dob": patient_data.get("birth_date"),
-            "gender": (patient_data.get("gender") or "unknown").lower(),
-            # 用电话作为 external_id 演示，避免重复创建
-            "external_id": str(patient_data.get("phone", "demo-id"))
-        }
-
-        print(f"🚀 [Heidi API] 正在发送数据: {payload['first_name']} {payload['last_name']}...")
-
-        try:
-            # 演示模式：认证失败时使用模拟 token，不真实调用 API
-            if self.jwt_token == "MOCK_TOKEN_FOR_DEMO":
-                print("✅ [演示模式] 数据发送模拟成功！(未真实调用API)")
-                return {"id": "mock_id_123", "status": "success", "action": "mock"}
-
-            response = self.session.post(
-                url,
-                json=payload,
-                headers=headers,
-                timeout=REQUEST_TIMEOUT
-            )
-            response.raise_for_status()
-            print("✅ [Heidi API] 创建成功！")
-            return response.json()
-
-        except Exception as e:
-            print(f"❌ [Heidi API] 发送失败: {e}")
-            return None
 
     def __enter__(self):
         """上下文管理器支持"""

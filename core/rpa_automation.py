@@ -425,7 +425,7 @@ class BrowserAutomation:
 
 
 class RPAWorkflow:
-    """RPA 工作流程编排"""
+    """RPA 工作流程编排 - 支持 Batch & Deep Dive"""
 
     def __init__(self, emr_app_path: Optional[str] = None, heidi_url: Optional[str] = None):
         """
@@ -440,6 +440,201 @@ class RPAWorkflow:
 
         # [配置] 控制是否开启循环。设为 1 即为单次提取模式（最快）
         self.max_extraction_loops = 1
+
+        # 初始化 Navigator 和 Client
+        self.navigator = AINavigator()
+        from .heidi_client import HeidiClient
+        self.client = HeidiClient()
+
+    def _go_back(self):
+        """Helper to return to list view (Browser Back)"""
+        from rich.console import Console
+        console = Console()
+        console.print("[dim]Navigating back...[/dim]")
+        # MacOS: Command + [
+        pyautogui.hotkey('command', '[')
+        time.sleep(3)
+
+    def process_single_patient(self, deep_dive: bool = False) -> bool:
+        """
+        Process the currently open patient page
+
+        参数:
+            deep_dive: 是否进行深度挖掘（查找 History, Clinical Notes 等标签页）
+
+        返回:
+            bool: 是否成功
+        """
+        from rich.console import Console
+        from .heidi_client import PatientProfile
+        console = Console()
+
+        # 1. Extract Basic Info
+        console.print("📸 Extracting Profile...")
+        screen = capture_full_screen()
+        data = self.navigator.extract_patient_details(screen)
+
+        if not data:
+            console.print("[red]Failed to extract data[/red]")
+            return False
+
+        context_text = ""
+
+        # 2. Deep Dive (Optional)
+        if deep_dive:
+            console.print("🕵️ Starting Deep Dive...")
+            # Define tabs to look for
+            targets = ["Clinical Notes", "History", "Documents", "Timeline"]
+
+            for target in targets:
+                # Capture current state to find button
+                nav_screen = capture_full_screen()
+                coords = self.navigator.find_tab_or_button(nav_screen, target)
+
+                if coords:
+                    console.print(f"👉 Clicking '{target}'...")
+                    pyautogui.click(coords)
+                    time.sleep(2)  # Wait for tab load
+
+                    # Extract content
+                    doc_screen = capture_full_screen()
+                    text = self.navigator.extract_free_text(doc_screen)
+                    context_text += f"\n\n--- {target} ---\n{text}"
+                    console.print(f"✅ Extracted {len(text)} chars from {target}")
+
+        # 3. Upload to Heidi
+        console.print("🚀 Uploading to Heidi...")
+        profile = PatientProfile(
+            first_name=data.get('first_name', ''),
+            last_name=data.get('last_name', ''),
+            birth_date=data.get('birth_date', ''),
+            gender=data.get('gender', 'OTHER'),
+            ehr_patient_id=data.get('ehr_patient_id', ''),
+            additional_context=context_text if context_text else None
+        )
+
+        try:
+            self.client.authenticate()
+            res = self.client.create_or_update_patient_profile(profile)
+            console.print(f"[green]Success! ID: {res.get('id')}[/green]")
+            return True
+        except Exception as e:
+            console.print(f"[red]Upload failed: {e}[/red]")
+            return False
+
+    def run_batch_mode(self, deep_dive: bool = False):
+        """
+        Batch Mode:
+        1. Find all rows.
+        2. Loop: Click -> Process -> Back -> Click Next...
+
+        参数:
+            deep_dive: 是否对每个病人进行深度挖掘
+        """
+        from rich.console import Console
+        console = Console()
+
+        console.print("[bold cyan]🚀 Starting Batch Mode[/bold cyan]")
+
+        # 1. Analyze List
+        list_screen = capture_full_screen()
+        patient_coords = self.navigator.locate_all_visible_patients(list_screen)
+
+        console.print(f"Found {len(patient_coords)} patients.")
+
+        if not patient_coords:
+            console.print("[red]No patients found in the list.[/red]")
+            return
+
+        # 2. Iterate
+        for i, (x, y) in enumerate(patient_coords):
+            console.print(f"\n--- Processing Patient {i+1}/{len(patient_coords)} ---")
+
+            pyautogui.moveTo(x, y, duration=0.5)
+            pyautogui.click()
+            time.sleep(3)  # Wait for profile load
+
+            self.process_single_patient(deep_dive=deep_dive)
+
+            self._go_back()
+            time.sleep(2)  # Wait for list refresh
+
+        console.print("\n[bold green]🎉 Batch Mode Complete![/bold green]")
+
+    def run_single_mode(self, deep_dive: bool = False):
+        """
+        Classic Single Mode - 处理第一个病人
+
+        参数:
+            deep_dive: 是否进行深度挖掘
+        """
+        from rich.console import Console
+        console = Console()
+
+        console.print("[bold cyan]🚀 Starting Single Mode[/bold cyan]")
+
+        # 1. Find & Click First
+        screen = capture_full_screen()
+        coords = self.navigator.locate_patient_row_universal(screen)
+
+        if coords:
+            pyautogui.click(coords)
+            time.sleep(3)
+            self.process_single_patient(deep_dive=deep_dive)
+        else:
+            console.print("[red]Could not find any patient row.[/red]")
+
+    def run_identify_and_click_first(self):
+        """
+        [精准验证模式]
+        1. 识别屏幕上所有病人
+        2. 打印列表供用户核对
+        3. 点击第一个病人
+        """
+        from rich.console import Console
+        from rich.table import Table
+        console = Console()
+
+        console.print("[bold cyan]🚀 启动精准识别模式[/bold cyan]")
+
+        # 1. 截图
+        console.print("[dim]正在截图...[/dim]")
+        screenshot_path = capture_full_screen()
+
+        # 2. AI 识别
+        console.print("[cyan]正在请求 AI 分析表格结构...[/cyan]")
+        patients = self.navigator.locate_all_visible_patients(screenshot_path)
+
+        if not patients:
+            console.print("[red]❌ 未识别到任何病人！请检查 tmp/screenshots/ 下的调试图片。[/red]")
+            return
+
+        # 3. 显示识别结果
+        table = Table(title=f"AI 识别到 {len(patients)} 位病人")
+        table.add_column("序号", style="cyan")
+        table.add_column("姓名", style="green")
+        table.add_column("坐标 (X, Y)", style="yellow")
+
+        for idx, p in enumerate(patients):
+            table.add_row(str(idx+1), p['name'], f"({p['x']}, {p['y']})")
+
+        console.print(table)
+        console.print("\n[dim]提示: 已保存标记位置的截图到 tmp/screenshots/，如果不准请查看。[/dim]\n")
+
+        # 4. 点击第一个
+        target = patients[0]
+        console.print(f"[bold green]👉 准备点击第 1 位: {target['name']} ({target['x']}, {target['y']})[/bold green]")
+
+        # 移动鼠标 (带动画，方便你看它移到哪了)
+        pyautogui.moveTo(target['x'], target['y'], duration=1.0, tween=pyautogui.easeInOutQuad)
+        time.sleep(0.5)
+        pyautogui.click()
+
+        console.print("[dim]点击完成，等待跳转...[/dim]")
+        time.sleep(3)
+
+        # 5. 后续处理 (提取并上传)
+        self.process_single_patient(deep_dive=True)
 
     def step1_launch_applications(self) -> bool:
         """
@@ -516,7 +711,7 @@ class RPAWorkflow:
 
     def step2_ai_find_and_click_patient(self) -> bool:
         """
-        步骤 2 (AI 增强版): 截图 -> AI 分析坐标 -> 本地点击
+        步骤 2 (AI 增强版 v2): 使用思维链推理定位
 
         返回:
             bool: 是否成功
@@ -524,33 +719,37 @@ class RPAWorkflow:
         from rich.console import Console
         console = Console()
 
-        console.print("\n[bold cyan]🧠 步骤 2: AI 视觉定位病人[/bold cyan]")
+        console.print("\n[bold cyan]🧠 步骤 2: AI 思维链定位病人[/bold cyan]")
 
         # 1. 截取全屏
         console.print("[dim]正在截取当前屏幕...[/dim]")
         screenshot_path = capture_full_screen()
 
-        # 2. 调用 Claude 进行定位
+        # 2. 调用 Claude 进行高级定位（带思维链推理）
         try:
             navigator = AINavigator()
-            console.print("[cyan]正在请求 AI 分析屏幕结构...[/cyan]")
+            console.print("[cyan]正在请求 AI 进行布局分析与定位...[/cyan]")
 
-            coords = navigator.locate_emr_patient_row(screenshot_path)
+            # 使用带有布局分析的高级定位
+            # 提示词专门针对 EMR 场景优化
+            target_desc = "EMR 系统病人列表中的【第一行数据】。请忽略表头(Header)，直接找到第一条病人记录的中心位置。"
+
+            coords = navigator.locate_with_layout_analysis(screenshot_path, target_desc)
 
             if coords:
                 target_x, target_y = coords
                 console.print(f"[green]✅ AI 定位成功！目标坐标: ({target_x}, {target_y})[/green]")
 
                 # 3. 本地执行鼠标操作
-                # 移动鼠标（带平滑动画，显得更自然）
-                pyautogui.moveTo(target_x, target_y, duration=0.6, tween=pyautogui.easeInOutQuad)
+                # 使用 easeInOutQuad 让移动轨迹更像人类，防止被某些系统判定为脚本
+                pyautogui.moveTo(target_x, target_y, duration=0.8, tween=pyautogui.easeInOutQuad)
 
                 # 点击
                 console.print(f"[dim]正在点击坐标 ({target_x}, {target_y})...[/dim]")
                 pyautogui.click()
 
                 # 等待页面加载（这是关键，进入详情页需要时间）
-                console.print("[dim]等待页面跳转 (3秒)...[/dim]")
+                console.print("[dim]⏳ 等待详情页加载 (3秒)...[/dim]")
                 time.sleep(3)
 
                 return True
@@ -698,7 +897,7 @@ class RPAWorkflow:
 
         console.print("\n[bold cyan]🚀 步骤 4: 发送到 Heidi[/bold cyan]")
 
-        # 方法 1: 使用 Heidi API（优先使用轻量的 /patients，避免需要 linked account 的 profile 接口）
+        # 方法 1: 使用 Heidi API patient profile 接口
         from core.heidi_client import HeidiClient, PatientProfile
 
         try:
@@ -719,13 +918,8 @@ class RPAWorkflow:
                 console.print("[cyan]正在进行身份验证...[/cyan]")
                 client.authenticate()
 
-                # 优先使用 create_patient（不依赖 linked account），若失败再尝试 profile 接口
-                console.print("[cyan]正在发送病人数据 (patients)...[/cyan]")
-                result = client.create_patient(patient_data)
-
-                if not result:
-                    console.print("[yellow]⚠️  /patients 接口返回空，尝试 profile 接口...[/yellow]")
-                    result = client.create_or_update_patient_profile(patient_profile)
+                console.print("[cyan]正在发送病人数据 (patient-profiles)...[/cyan]")
+                result = client.create_or_update_patient_profile(patient_profile)
 
             console.print("[green]✅ 成功发送到 Heidi API[/green]")
             console.print(f"[dim]Response: {result}[/dim]")

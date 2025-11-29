@@ -1,302 +1,252 @@
 """
 core/ai_locator.py
-AI 视觉定位器 - 调用 Claude API 分析屏幕截图并返回坐标
+AI Vision Core - Table Grid Analysis & Visual Debugging
 """
-
 import os
 import base64
 import json
 import time
-import re
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, List
 import pyautogui
 from anthropic import Anthropic
 from rich.console import Console
+from PIL import Image, ImageDraw
 
-# 引用现有配置
-from .config import DEBUG_MODE
+# 引用配置
+from .config import DEBUG_MODE, SCREENSHOT_OUTPUT_DIR
 
 console = Console()
 
+
 class AINavigator:
     def __init__(self, api_key: Optional[str] = None):
-        # 优先使用传入的 Key，否则读取环境变量
         self.api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
         if not self.api_key:
-            raise ValueError("未找到 ANTHROPIC_API_KEY，请在 .env 文件中配置")
+            console.print("[yellow]⚠️  未配置 ANTHROPIC_API_KEY，AI 功能将不可用[/yellow]")
 
-        self.client = Anthropic(api_key=self.api_key)
+        self.client = Anthropic(api_key=self.api_key) if self.api_key else None
         self.model = os.getenv("AI_MODEL_NAME", "claude-3-5-sonnet-20241022")
-
-        # 获取当前屏幕物理分辨率，用于坐标校准（如果需要）
-        self.screen_width, self.screen_height = pyautogui.size()
-
-    def _extract_json(self, content: str) -> Dict:
-        """
-        兼容 Claude 可能返回的额外文字/Markdown，提取第一个 JSON 对象。
-        """
-        # 清理代码块
-        if "```json" in content:
-            content = content.split("```json", 1)[1]
-        if "```" in content:
-            content = content.split("```", 1)[0]
-        # 抓取第一个 {...}
-        match = re.search(r"\{.*\}", content, flags=re.S)
-        if not match:
-            raise ValueError(f"未找到 JSON 对象，原始内容: {content[:200]}")
-        json_text = match.group(0)
-        return json.loads(json_text)
+        self.screen_w, self.screen_h = pyautogui.size()
 
     def _encode_image(self, image_path: str) -> str:
-        """将图片转换为 base64 编码"""
         with open(image_path, "rb") as image_file:
             return base64.b64encode(image_file.read()).decode('utf-8')
 
-    def locate_target(self, screenshot_path: str, prompt_instruction: str) -> Optional[Dict]:
+    def _debug_draw_points(self, image_path: str, coords: List[Dict], tag: str = "debug"):
         """
-        通用的 AI 视觉定位函数
-
-        参数:
-            screenshot_path: 截图路径
-            prompt_instruction: 告诉 AI 要找什么（例如："找到病人列表的第一行"）
-
-        返回:
-            Dict: {found: bool, x: int, y: int, reason: str}
+        [调试神器] 在截图上画出 AI 识别到的点，保存到 tmp/screenshots/
         """
-        base64_image = self._encode_image(screenshot_path)
-
-        # 系统提示词：强制输出 JSON 格式的坐标
-        system_prompt = f"""
-        你是一个精通 GUI 自动化的 AI 助手。你的任务是分析屏幕截图，找到用户指定的 UI 元素，并返回其中心点的像素坐标。
-
-        当前屏幕分辨率为: {self.screen_width}x{self.screen_height}。
-
-        请严格遵守以下输出格式，只返回纯 JSON，不要包含任何 Markdown 标记或额外解释：
-        {{
-            "found": true,
-            "x": 123,
-            "y": 456,
-            "reason": "简短描述你找到了什么，例如 'Found patient list, row 1'"
-        }}
-
-        如果画面中完全找不到目标元素，返回：
-        {{
-            "found": false,
-            "reason": "未找到目标元素的描述"
-        }}
-        """
-
-        user_message = f"请在截图中找到以下目标：{prompt_instruction}。请给出点击该位置的精确坐标(x, y)。"
+        if not DEBUG_MODE:
+            return
 
         try:
-            start_time = time.time()
-            if DEBUG_MODE:
-                console.print(f"[dim]正在请求 {self.model} 进行视觉定位...[/dim]")
+            img = Image.open(image_path)
+            draw = ImageDraw.Draw(img)
 
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=1024,
-                system=system_prompt,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image",
-                                "source": {
-                                    "type": "base64",
-                                    "media_type": "image/png",
-                                    "data": base64_image
-                                }
-                            },
-                            {
-                                "type": "text",
-                                "text": user_message
-                            }
-                        ]
-                    }
-                ]
-            )
+            # 画点和文字
+            for idx, item in enumerate(coords):
+                x = item['x']
+                y = item['y']
+                name = item.get('name', 'Unknown')
 
-            duration = time.time() - start_time
-            content = response.content[0].text.strip()
+                # 画一个红圈
+                r = 10
+                draw.ellipse((x-r, y-r, x+r, y+r), outline="red", width=3)
+                # 写上序号和名字
+                draw.text((x+15, y), f"#{idx+1}: {name}", fill="red")
 
-            try:
-                result = self._extract_json(content)
-            except Exception as parse_err:
-                console.print(f"[red]⚠️  AI 返回解析失败: {parse_err}[/red]")
-                if DEBUG_MODE:
-                    console.print(f"[dim]原始内容:\n{content}\n[/dim]")
-                return None
-
-            if DEBUG_MODE:
-                console.print(f"[dim]AI 响应 ({duration:.2f}s): {result}[/dim]")
-
-            return result
-
+            # 确保目录存在
+            save_path = SCREENSHOT_OUTPUT_DIR / f"ai_vision_{tag}_{int(time.time())}.png"
+            img.save(save_path)
+            console.print(f"[yellow]🔍 [Debug] 视觉识别结果已保存: {save_path}[/yellow]")
+            console.print("[dim]请打开该图片检查 AI 定位是否准确[/dim]")
         except Exception as e:
-            console.print(f"[bold red]AI 定位请求失败: {e}[/bold red]")
-            if DEBUG_MODE:
-                import traceback
-                console.print(traceback.format_exc())
+            console.print(f"[red]画图失败: {e}[/red]")
+
+    def _call_claude_json(self, image_path: str, prompt: str) -> Optional[Dict]:
+        """发送请求并获取 JSON"""
+        if not self.client:
+            console.print("[red]❌ AI 客户端未初始化[/red]")
             return None
 
-    def locate_emr_patient_row(self, screenshot_path: str) -> Optional[Tuple[int, int]]:
-        """
-        [Step 2] 视觉定位：找到列表中的第一个病人 (使用相对坐标解决 Retina 缩放问题)
-        """
-        base64_image = self._encode_image(screenshot_path)
-
-        # 获取当前逻辑屏幕尺寸 (pyautogui 使用的尺寸)
-        screen_w, screen_h = pyautogui.size()
-
-        system_prompt = f"""
-        你是一个 GUI 自动化助手。你的任务是分析 EMR (电子病历) 系统的病人列表界面。
-
-        请找到列表内容区域的"第一行"或"第一位病人"的位置。
-        注意：请忽略表头（Header），只关注数据行。
-
-        【关键要求】
-        由于截图分辨率可能与鼠标坐标系不同，请返回 **相对坐标 (0.0 - 1.0)**。
-        x_percent: 距离左边的比例 (0.0-1.0)
-        y_percent: 距离顶部的比例 (0.0-1.0)
-
-        请返回纯 JSON：
-        {{ "found": true, "x_percent": 0.5, "y_percent": 0.3 }}
-        如果没找到，返回 {{ "found": false }}。
-        """
-
+        b64_data = self._encode_image(image_path)
         try:
             if DEBUG_MODE:
-                console.print(f"[dim]AI 定位请求中 ({self.model})...[/dim]")
-
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=1024,
-                system=system_prompt,
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": base64_image}},
-                        {"type": "text", "text": "请找到第一个病人的点击位置，返回相对坐标。"}
-                    ]
-                }]
-            )
-
-            content = response.content[0].text.strip()
-
-            data = self._extract_json(content)
-
-            if data.get("found"):
-                # 将相对坐标转换为本地的逻辑坐标
-                rel_x = data.get("x_percent")
-                rel_y = data.get("y_percent")
-
-                # 转换为这一台电脑的实际点击坐标
-                final_x = int(rel_x * screen_w)
-                final_y = int(rel_y * screen_h)
-
-                if DEBUG_MODE:
-                    console.print(f"[dim]相对坐标: ({rel_x:.2f}, {rel_y:.2f}) -> 逻辑坐标: ({final_x}, {final_y})[/dim]")
-
-                return final_x, final_y
-
-            return None
-
-        except Exception as e:
-            console.print(f"[red]AI 定位失败: {e}[/red]")
-            if DEBUG_MODE:
-                import traceback
-                console.print(traceback.format_exc())
-            return None
-
-    def extract_page_data(self, screenshot_path: str, context_data: Optional[Dict] = None) -> Dict:
-        """
-        [Step 3] 智能提取接口 (保留了循环的口子)
-
-        参数:
-            screenshot_path: 当前截图
-            context_data: (可选) 上一轮循环已获取的数据，用于告诉 AI 缺什么
-
-        返回:
-            JSON Dict: {
-                "patient_info": { ...提取到的字段... },
-                "is_complete": bool,  <-- 循环控制开关
-                "next_action": {      <-- 循环操作指令
-                    "type": "finish" | "click" | "scroll",
-                    "reason": "需要点击 History 标签",
-                    "x": 100, "y": 200
-                }
-            }
-        """
-        base64_image = self._encode_image(screenshot_path)
-        context_str = json.dumps(context_data, ensure_ascii=False) if context_data else "None"
-
-        system_prompt = """
-        你是一个医疗数据录入专家。任务是从当前屏幕提取病人信息。
-
-        【提取规则】
-        尽可能提取以下字段：first_name, last_name, gender, birth_date (YYYY-MM-DD), ehr_patient_id。
-
-        【循环控制规则】
-        你需要判断当前信息是否完整，或者页面是否有更多内容（例如需要滚动或切换标签页）。
-
-        请严格输出以下 JSON 格式：
-        {
-            "patient_info": {
-                "first_name": "...",
-                "last_name": "...",
-                "gender": "...",
-                "birth_date": "...",
-                "ehr_patient_id": "..."
-            },
-            "is_complete": true,  // 如果关键信息已全，设为 true
-            "next_action": {
-                "type": "finish", // 如果已完成，设为 "finish"。如果需要操作，设为 "click" 或 "scroll"
-                "reason": "Data extracted successfully"
-            }
-        }
-        """
-
-        try:
-            if DEBUG_MODE:
-                console.print(f"[dim]AI 提取请求中... (上下文: {bool(context_data)})[/dim]")
+                console.print(f"[dim]正在请求 AI 分析 ({self.model})...[/dim]")
 
             response = self.client.messages.create(
                 model=self.model,
                 max_tokens=2048,
-                system=system_prompt,
+                system="You are a UI Automation Agent. Output strictly in JSON format. No markdown.",
                 messages=[{
                     "role": "user",
                     "content": [
-                        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": base64_image}},
-                        {"type": "text", "text": f"当前已知信息: {context_str}。请提取当前页面信息并判断下一步。"}
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64_data}},
+                        {"type": "text", "text": prompt}
                     ]
                 }]
             )
-
             content = response.content[0].text.strip()
-
-            # JSON 清理逻辑
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0]
-            elif "{" in content:
+            # 兼容 Markdown 代码块
+            if "{" in content:
                 content = content[content.find("{"):content.rfind("}")+1]
-
-            result = json.loads(content)
-
-            if DEBUG_MODE:
-                console.print(f"[dim]AI 提取结果: {result.get('patient_info', {})}[/dim]")
-
-            return result
-
+            return json.loads(content)
         except Exception as e:
-            console.print(f"[red]AI 提取失败: {e}[/red]")
-            if DEBUG_MODE:
-                import traceback
-                console.print(traceback.format_exc())
+            console.print(f"[red]AI Request Error: {e}[/red]")
+            return None
+
+    def locate_all_visible_patients(self, screenshot_path: str) -> List[Dict]:
+        """
+        [精准批量识别]
+        返回列表: [{'name': 'Diana', 'x': 100, 'y': 200}, ...]
+        """
+        # 使用"表格列对齐"的强提示词
+        prompt = f"""
+        Analyze this EMR Patient List screenshot (Resolution: {self.screen_w}x{self.screen_h}).
+
+        Your Goal: Identify **ALL patient rows** in the main table.
+
+        **Visual Reasoning Steps (CoT):**
+        1.  **Find Header**: Locate the table header row containing "Name", "DOB", "Gender".
+        2.  **Column Alignment**: Identify the "Name" column. Patient names are vertically aligned under the "Name" header.
+        3.  **Row Scanning**: Scan downwards from the header. Extract every visible patient name in that column.
+        4.  **Ignore**: Ignore the header itself. Ignore buttons like "+ New patient".
+        5.  **Coordinates**: Return the **Center (x,y)** of each name text as **Relative Percentages (0.0-1.0)**.
+
+        **Output JSON Format:**
+        {{
+            "patients": [
+                {{ "name": "Diana Rossi", "x_percent": 0.12, "y_percent": 0.25 }},
+                {{ "name": "Elena Martinez", "x_percent": 0.12, "y_percent": 0.35 }},
+                ...
+            ]
+        }}
+        """
+
+        data = self._call_claude_json(screenshot_path, prompt)
+
+        results = []
+        if data and "patients" in data:
+            for p in data["patients"]:
+                # 将相对坐标转为绝对坐标
+                abs_x = int(p["x_percent"] * self.screen_w)
+                abs_y = int(p["y_percent"] * self.screen_h)
+
+                results.append({
+                    "name": p.get("name", "Unknown"),
+                    "x": abs_x,
+                    "y": abs_y
+                })
+
+        # [Debug] 画出来看看准不准
+        if results:
+            self._debug_draw_points(screenshot_path, results, tag="patients")
+
+        return results
+
+    def locate_patient_row_universal(self, screenshot_path: str) -> Optional[Tuple[int, int]]:
+        """
+        [Single Mode] Locate the FIRST patient row using CoT.
+        """
+        prompt = f"""
+        Analyze this EMR screenshot (Resolution: {self.screen_w}x{self.screen_h}).
+        Find the **First Patient Row** in the main data table.
+
+        **Steps:**
+        1. Identify the main table headers (e.g., "Name", "DOB", "Gender").
+        2. Locate the **first data row** directly below the headers.
+        3. Identify the patient's name text (usually blue/clickable) in that row.
+        4. Calculate the center coordinates of this name text as **relative percentages (0.0-1.0)**.
+
+        **Output JSON:**
+        {{
+            "found": true,
+            "x_percent": 0.15,
+            "y_percent": 0.25,
+            "reason": "Found 'Diana Rossi' in the first row."
+        }}
+        """
+        data = self._call_claude_json(screenshot_path, prompt)
+        if data and data.get("found"):
+            return int(data["x_percent"] * self.screen_w), int(data["y_percent"] * self.screen_h)
+        return None
+
+    def extract_patient_details(self, screenshot_path: str) -> Optional[Dict]:
+        """
+        [Data Extraction] Extract structured patient info from detail page.
+        """
+        prompt = """
+        Extract patient details from this profile page.
+        Required Fields: first_name, last_name, gender (MALE/FEMALE/OTHER), birth_date (YYYY-MM-DD), ehr_patient_id.
+        Output JSON only.
+        """
+        return self._call_claude_json(screenshot_path, prompt)
+
+    def find_tab_or_button(self, screenshot_path: str, target_name: str) -> Optional[Tuple[int, int]]:
+        """
+        [Deep Dive] Find specific UI elements like 'History' tabs.
+        """
+        prompt = f"""
+        Find the clickable button, tab, or link labeled **"{target_name}"**.
+        It might be in a sidebar, top menu, or card header.
+
+        Return relative coordinates (0.0-1.0).
+        JSON: {{ "found": true, "x_percent": ..., "y_percent": ... }}
+        """
+        data = self._call_claude_json(screenshot_path, prompt)
+        if data and data.get("found"):
+            return int(data["x_percent"] * self.screen_w), int(data["y_percent"] * self.screen_h)
+        return None
+
+    def extract_free_text(self, screenshot_path: str) -> str:
+        """
+        [Deep Dive] Extract raw text context from a history/document page.
+        """
+        if not self.client:
+            console.print("[red]❌ AI 客户端未初始化[/red]")
+            return ""
+
+        b64 = self._encode_image(screenshot_path)
+        try:
+            resp = self.client.messages.create(
+                model=self.model,
+                max_tokens=2048,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64}},
+                        {"type": "text", "text": "OCR this image. Extract all clinical notes, history, or medical text visible. Output text only."}
+                    ]
+                }]
+            )
+            return resp.content[0].text
+        except Exception as e:
+            console.print(f"[red]AI Error: {e}[/red]")
+            return ""
+
+    # ==========================================
+    # Legacy methods for backwards compatibility
+    # ==========================================
+
+    def locate_with_layout_analysis(self, screenshot_path: str, user_target_desc: str) -> Optional[Tuple[int, int]]:
+        """
+        [高级定位] 引入思维链 (CoT) 的视觉定位 - 兼容旧接口
+        """
+        return self.locate_patient_row_universal(screenshot_path)
+
+    def extract_page_data(self, screenshot_path: str, context_data: Optional[Dict] = None) -> Dict:
+        """
+        [Step 3] 智能提取接口 - 兼容旧接口
+        """
+        data = self.extract_patient_details(screenshot_path)
+        if data:
             return {
-                "patient_info": {},
+                "patient_info": data,
                 "is_complete": True,
-                "next_action": {"type": "finish", "reason": "提取失败"}
+                "next_action": {"type": "finish", "reason": "Data extracted successfully"}
             }
+        return {
+            "patient_info": {},
+            "is_complete": True,
+            "next_action": {"type": "finish", "reason": "Extraction failed"}
+        }

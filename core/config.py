@@ -16,7 +16,9 @@ load_dotenv()
 # ============================================
 
 # Heidi API 基础 URL（根据官方文档调整）
-HEIDI_BASE_URL: str = os.getenv("HEIDI_BASE_URL", "https://api.heidihealth.com")
+# 正确的 Base URL: https://registrar.api.heidihealth.com/api/v2/ml-scribe/open-api
+# 注意：不要使用 /api/v1 或其他变体
+HEIDI_BASE_URL: str = os.getenv("HEIDI_BASE_URL", "https://registrar.api.heidihealth.com/api/v2/ml-scribe/open-api")
 
 # Heidi Web 界面 URL（RPA 流程中打开的页面）
 HEIDI_WEB_URL: str = os.getenv("HEIDI_WEB_URL", "https://scribe.heidihealth.com/zh/settings/account#selectedOrganizationId=null")
