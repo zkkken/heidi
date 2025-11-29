@@ -636,6 +636,207 @@ class RPAWorkflow:
         # 5. 后续处理 (提取并上传)
         self.process_single_patient(deep_dive=True)
 
+    def run_fast_batch_import(self):
+        """
+        [v3.0 新功能] 极速批量建档 (不点击，直接读列表)
+        直接从列表页 OCR 提取数据，批量上传到 Heidi
+        """
+        from rich.console import Console
+        from rich.table import Table
+        from .heidi_client import HeidiClient, PatientProfile
+        console = Console()
+
+        console.print("[bold cyan]🚀 启动极速批量建档模式 (List-to-API)[/bold cyan]")
+
+        # 1. 截图
+        console.print("📸 截取病人列表...")
+        screen_path = capture_full_screen()
+
+        # 2. AI 批量提取
+        patients = self.navigator.extract_patient_list_data(screen_path)
+        console.print(f"📋 识别到 {len(patients)} 位病人")
+
+        if not patients:
+            console.print("[red]未识别到数据，请检查屏幕[/red]")
+            return
+
+        # 显示识别结果
+        table = Table(title="识别到的病人数据")
+        table.add_column("序号", style="cyan")
+        table.add_column("姓名", style="green")
+        table.add_column("生日", style="yellow")
+        table.add_column("性别", style="magenta")
+
+        for idx, p in enumerate(patients):
+            name = f"{p.get('first_name', '')} {p.get('last_name', '')}"
+            table.add_row(str(idx+1), name, p.get('birth_date', ''), p.get('gender', ''))
+
+        console.print(table)
+
+        # 3. 批量上传
+        console.print("\n[cyan]开始批量上传到 Heidi...[/cyan]")
+        client = HeidiClient()
+        try:
+            client.authenticate()
+        except Exception as e:
+            console.print(f"[red]认证失败: {e}[/red]")
+            return
+
+        success_count = 0
+        for p in patients:
+            name = f"{p.get('first_name', '')} {p.get('last_name', '')}"
+            console.print(f"\nProcessing: [bold]{name}[/bold]")
+
+            profile = PatientProfile(
+                first_name=p.get('first_name', ''),
+                last_name=p.get('last_name', ''),
+                birth_date=p.get('birth_date', ''),
+                gender=p.get('gender', 'OTHER'),
+                ehr_patient_id=p.get('ehr_patient_id', ''),
+                additional_context=p.get('additional_context', '')
+            )
+
+            try:
+                res = client.create_or_update_patient_profile(profile)
+                console.print(f"[green]✅ 成功! ID: {res.get('id')}[/green]")
+                success_count += 1
+            except Exception as e:
+                console.print(f"[red]❌ 失败: {e}[/red]")
+
+        console.print(f"\n[bold green]🎉 批量建档完成: {success_count}/{len(patients)} 成功[/bold green]")
+
+    def run_precise_click_demo(self):
+        """
+        [v3.0 新功能] 测试二次截图精准定位 (Crop & Refine)
+        先找区域，再精确定位，解决 Retina 屏偏移问题
+        """
+        from rich.console import Console
+        console = Console()
+
+        console.print("[bold cyan]🎯 测试精准定位 (Crop & Refine)[/bold cyan]")
+        screen_path = capture_full_screen()
+
+        # 寻找第一行名字
+        coords = self.navigator.locate_patient_precise(screen_path, target_desc="First patient Name text")
+
+        if coords:
+            x, y = coords
+            console.print(f"👉 移动鼠标到: ({x}, {y})")
+            pyautogui.moveTo(x, y, duration=1)
+            console.print("[dim]测试模式：仅移动鼠标，未点击[/dim]")
+            console.print("[yellow]如果位置正确，可以手动点击或修改代码启用自动点击[/yellow]")
+        else:
+            console.print("[red]定位失败[/red]")
+
+    # =========================================================
+    # v4.0 菜单模式专用方法
+    # =========================================================
+
+    def _upload_to_heidi(self, data: dict):
+        """上传单个病人数据到 Heidi"""
+        from .heidi_client import PatientProfile
+        try:
+            profile = PatientProfile(
+                first_name=data.get('first_name', ''),
+                last_name=data.get('last_name', ''),
+                birth_date=data.get('birth_date', ''),
+                gender=data.get('gender', 'OTHER'),
+                ehr_patient_id=data.get('ehr_patient_id', ''),
+                additional_context=data.get('additional_context', '')
+            )
+            self.client.authenticate()
+            res = self.client.create_or_update_patient_profile(profile)
+            from rich.console import Console
+            Console().print(f"[green]✅ 已同步: {data.get('first_name')} {data.get('last_name')} (ID: {res.get('id')})[/green]")
+            return True
+        except Exception as e:
+            from rich.console import Console
+            Console().print(f"[red]❌ 上传失败: {e}[/red]")
+            return False
+
+    def run_batch_import(self):
+        """
+        [菜单模式 1] 批量建档 (List-to-API)
+        识别列表 -> 预览确认 -> 批量导入
+        """
+        from rich.console import Console
+        from rich.table import Table
+        console = Console()
+
+        console.print("[bold cyan]🚀 启动模式 1: 批量识别与建档[/bold cyan]")
+        console.print("[dim]请确保当前屏幕显示病人列表...[/dim]")
+
+        # 1. 截图并识别
+        screen_path = capture_full_screen()
+        patients = self.navigator.extract_patient_list_data(screen_path)
+
+        if not patients:
+            console.print("[red]❌ 未识别到病人数据[/red]")
+            return
+
+        # 2. 展示预览
+        table = Table(title=f"识别到 {len(patients)} 位病人")
+        table.add_column("序号", style="cyan")
+        table.add_column("姓名", style="green")
+        table.add_column("生日", style="yellow")
+        table.add_column("性别", style="magenta")
+
+        for idx, p in enumerate(patients):
+            name = f"{p.get('first_name', '')} {p.get('last_name', '')}"
+            table.add_row(str(idx+1), name, p.get('birth_date', ''), p.get('gender', ''))
+
+        console.print(table)
+
+        # 3. 确认后执行批量上传
+        confirm = input("\n确认批量导入? (y/n): ").strip().lower()
+        if confirm == 'y':
+            success_count = 0
+            for p in patients:
+                if self._upload_to_heidi(p):
+                    success_count += 1
+                time.sleep(0.5)
+            console.print(f"[bold green]✨ 批量处理完成！成功: {success_count}/{len(patients)}[/bold green]")
+        else:
+            console.print("[yellow]已取消批量导入[/yellow]")
+
+    def run_precise_entry(self, target_index: int = 0):
+        """
+        [菜单模式 2] 精准点击与深挖 (Precise Click & Deep Dive)
+        使用二次截图技术精准点击，然后提取详情页信息
+        """
+        from rich.console import Console
+        console = Console()
+
+        console.print(f"[bold cyan]🚀 启动模式 2: 精准点击第 {target_index+1} 位病人[/bold cyan]")
+
+        # 1. 截图与定位
+        screen_path = capture_full_screen()
+        coords = self.navigator.locate_patient_precise(screen_path, f"Row #{target_index+1} patient Name text")
+
+        if not coords:
+            console.print("[red]❌ 定位失败，无法点击[/red]")
+            return
+
+        # 2. 鼠标点击
+        x, y = coords
+        console.print(f"👉 点击坐标: ({x}, {y})")
+        pyautogui.moveTo(x, y, duration=0.8, tween=pyautogui.easeInOutQuad)
+        pyautogui.click()
+
+        console.print("[dim]等待详情页加载 (3s)...[/dim]")
+        time.sleep(3)
+
+        # 3. 详情页提取
+        console.print("📸 正在提取详情页完整信息...")
+        detail_screen = capture_full_screen()
+        full_data = self.navigator.extract_profile_details(detail_screen)
+
+        if full_data:
+            console.print("[green]✅ 详情提取成功[/green]")
+            self._upload_to_heidi(full_data)
+        else:
+            console.print("[red]❌ 详情提取失败[/red]")
+
     def step1_launch_applications(self) -> bool:
         """
         步骤 1: 启动 EMR 和 Heidi 浏览器
