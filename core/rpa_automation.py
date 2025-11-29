@@ -698,7 +698,7 @@ class RPAWorkflow:
 
         console.print("\n[bold cyan]🚀 步骤 4: 发送到 Heidi[/bold cyan]")
 
-        # 方法 1: 使用 Heidi API（推荐）
+        # 方法 1: 使用 Heidi API（优先使用轻量的 /patients，避免需要 linked account 的 profile 接口）
         from core.heidi_client import HeidiClient, PatientProfile
 
         try:
@@ -719,11 +719,16 @@ class RPAWorkflow:
                 console.print("[cyan]正在进行身份验证...[/cyan]")
                 client.authenticate()
 
-                console.print("[cyan]正在发送病人数据...[/cyan]")
-                result = client.create_or_update_patient_profile(patient_profile)
+                # 优先使用 create_patient（不依赖 linked account），若失败再尝试 profile 接口
+                console.print("[cyan]正在发送病人数据 (patients)...[/cyan]")
+                result = client.create_patient(patient_data)
+
+                if not result:
+                    console.print("[yellow]⚠️  /patients 接口返回空，尝试 profile 接口...[/yellow]")
+                    result = client.create_or_update_patient_profile(patient_profile)
 
             console.print("[green]✅ 成功发送到 Heidi API[/green]")
-            console.print(f"[dim]Patient Profile ID: {result.get('id', 'N/A')}[/dim]")
+            console.print(f"[dim]Response: {result}[/dim]")
             return True
 
         except Exception as e:

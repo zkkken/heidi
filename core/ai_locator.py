@@ -7,6 +7,7 @@ import os
 import base64
 import json
 import time
+import re
 from typing import Dict, Optional, Tuple
 import pyautogui
 from anthropic import Anthropic
@@ -29,6 +30,22 @@ class AINavigator:
 
         # 获取当前屏幕物理分辨率，用于坐标校准（如果需要）
         self.screen_width, self.screen_height = pyautogui.size()
+
+    def _extract_json(self, content: str) -> Dict:
+        """
+        兼容 Claude 可能返回的额外文字/Markdown，提取第一个 JSON 对象。
+        """
+        # 清理代码块
+        if "```json" in content:
+            content = content.split("```json", 1)[1]
+        if "```" in content:
+            content = content.split("```", 1)[0]
+        # 抓取第一个 {...}
+        match = re.search(r"\{.*\}", content, flags=re.S)
+        if not match:
+            raise ValueError(f"未找到 JSON 对象，原始内容: {content[:200]}")
+        json_text = match.group(0)
+        return json.loads(json_text)
 
     def _encode_image(self, image_path: str) -> str:
         """将图片转换为 base64 编码"""
@@ -104,13 +121,13 @@ class AINavigator:
             duration = time.time() - start_time
             content = response.content[0].text.strip()
 
-            # 清理可能的 Markdown 标记
-            if content.startswith("```json"):
-                content = content[7:]
-            if content.endswith("```"):
-                content = content[:-3]
-
-            result = json.loads(content)
+            try:
+                result = self._extract_json(content)
+            except Exception as parse_err:
+                console.print(f"[red]⚠️  AI 返回解析失败: {parse_err}[/red]")
+                if DEBUG_MODE:
+                    console.print(f"[dim]原始内容:\n{content}\n[/dim]")
+                return None
 
             if DEBUG_MODE:
                 console.print(f"[dim]AI 响应 ({duration:.2f}s): {result}[/dim]")
@@ -126,19 +143,26 @@ class AINavigator:
 
     def locate_emr_patient_row(self, screenshot_path: str) -> Optional[Tuple[int, int]]:
         """
-        [Step 2] 视觉定位：找到列表中的第一个病人
+        [Step 2] 视觉定位：找到列表中的第一个病人 (使用相对坐标解决 Retina 缩放问题)
         """
         base64_image = self._encode_image(screenshot_path)
 
+        # 获取当前逻辑屏幕尺寸 (pyautogui 使用的尺寸)
+        screen_w, screen_h = pyautogui.size()
+
         system_prompt = f"""
-        你是一个 GUI 自动化助手。当前屏幕分辨率为 {self.screen_width}x{self.screen_height}。
-        你的任务是分析 EMR (电子病历) 系统的病人列表界面。
+        你是一个 GUI 自动化助手。你的任务是分析 EMR (电子病历) 系统的病人列表界面。
 
         请找到列表内容区域的"第一行"或"第一位病人"的位置。
         注意：请忽略表头（Header），只关注数据行。
 
-        请返回点击该行的中心坐标 (x, y)，格式为纯 JSON：
-        {{ "found": true, "x": 123, "y": 456 }}
+        【关键要求】
+        由于截图分辨率可能与鼠标坐标系不同，请返回 **相对坐标 (0.0 - 1.0)**。
+        x_percent: 距离左边的比例 (0.0-1.0)
+        y_percent: 距离顶部的比例 (0.0-1.0)
+
+        请返回纯 JSON：
+        {{ "found": true, "x_percent": 0.5, "y_percent": 0.3 }}
         如果没找到，返回 {{ "found": false }}。
         """
 
@@ -154,23 +178,29 @@ class AINavigator:
                     "role": "user",
                     "content": [
                         {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": base64_image}},
-                        {"type": "text", "text": "请找到第一个病人的点击位置。"}
+                        {"type": "text", "text": "请找到第一个病人的点击位置，返回相对坐标。"}
                     ]
                 }]
             )
 
             content = response.content[0].text.strip()
 
-            # 清理 JSON 标记
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0]
-            elif "{" in content:
-                content = content[content.find("{"):content.rfind("}")+1]
+            data = self._extract_json(content)
 
-            result = json.loads(content)
+            if data.get("found"):
+                # 将相对坐标转换为本地的逻辑坐标
+                rel_x = data.get("x_percent")
+                rel_y = data.get("y_percent")
 
-            if result.get("found"):
-                return (result.get("x"), result.get("y"))
+                # 转换为这一台电脑的实际点击坐标
+                final_x = int(rel_x * screen_w)
+                final_y = int(rel_y * screen_h)
+
+                if DEBUG_MODE:
+                    console.print(f"[dim]相对坐标: ({rel_x:.2f}, {rel_y:.2f}) -> 逻辑坐标: ({final_x}, {final_y})[/dim]")
+
+                return final_x, final_y
+
             return None
 
         except Exception as e:

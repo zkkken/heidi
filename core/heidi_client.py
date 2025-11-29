@@ -117,7 +117,7 @@ class HeidiClient:
                      internal_id: Optional[int] = None,
                      force_refresh: bool = False) -> str:
         """
-        使用 shared API key 换取 JWT token
+        官方认证流程：GET /jwt
 
         参数:
             email: 第三方标识邮箱，默认使用 config 中的配置
@@ -129,10 +129,6 @@ class HeidiClient:
 
         异常:
             HeidiAuthenticationError: 认证失败
-
-        注意:
-            - 根据 Heidi API 文档调整认证接口的 URL 和参数
-            - 当前实现假设接口为 POST /jwt 或 POST /auth/token
         """
         # 如果已有 token 且未过期，直接返回
         if self.jwt_token and not force_refresh:
@@ -144,68 +140,59 @@ class HeidiClient:
         email = email or HEIDI_AUTH_EMAIL
         internal_id = internal_id or HEIDI_AUTH_INTERNAL_ID
 
-        payload = {
+        # 官方文档路径: /jwt
+        auth_url = f"{self.base_url}/jwt"
+
+        # 官方文档要求的参数 (GET Query Params)
+        params = {
             "email": email,
-            "id": internal_id
+            "third_party_internal_id": str(internal_id)  # 注意参数名
         }
 
-        auth_paths = [
-            "/api/v1/auth/jwt",  # 首选标准路径
-            "/jwt"               # 兼容旧路径
-        ]
+        # 官方文档要求的 Header
+        headers = {
+            "Heidi-Api-Key": self.api_key,  # 注意：Key 名为 Heidi-Api-Key
+            "Content-Type": "application/json"
+        }
 
-        last_error: Optional[Exception] = None
+        try:
+            if DEBUG_MODE:
+                print(f"🔐 [Heidi API] 正在认证... URL: {auth_url}")
+                print(f"    Params: {params}")
 
-        for path in auth_paths:
-            url = f"{self.base_url}{path}"
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
-            }
+            # 修改为 GET 请求
+            response = self.session.get(
+                auth_url,
+                params=params,
+                headers=headers,
+                timeout=REQUEST_TIMEOUT
+            )
 
-            try:
-                print(f"🔐 [Heidi API] 正在认证... URL: {url}")
-                response = self.session.post(
-                    url,
-                    json=payload,
-                    headers=headers,
-                    timeout=REQUEST_TIMEOUT
-                )
+            response.raise_for_status()
+            result = response.json()
 
-                # 404 时尝试下一个路径
-                if response.status_code == 404:
-                    if DEBUG_MODE:
-                        print(f"⚠️  路径 {url} 返回 404，尝试备用路径...")
-                    continue
+            # 获取 Token (通常在 token 或 data.token 字段)
+            self.jwt_token = result.get("token") or result.get("data", {}).get("token")
 
-                response.raise_for_status()
-                data = response.json()
+            if not self.jwt_token:
+                raise HeidiAuthenticationError(f"响应中未找到 Token: {result}")
 
-                # 兼容多种 token 字段
-                self.jwt_token = data.get("token") or data.get("jwt") or data.get("access_token")
-                if not self.jwt_token:
-                    raise HeidiAuthenticationError(
-                        f"认证响应中未找到 token。响应: {data}"
-                    )
+            # 默认 1 小时过期
+            expires_in = result.get("expires_in", 3600)
+            self.token_expiry = time.time() + expires_in - 60
 
-                expires_in = data.get("expires_in", 3600)
-                self.token_expiry = time.time() + expires_in - 60
-
+            if DEBUG_MODE:
                 print(f"✅ [Heidi API] 认证成功! Token: {self.jwt_token[:10]}...")
-                return self.jwt_token
 
-            except Exception as e:  # 捕获并尝试下一个路径
-                last_error = e
-                if DEBUG_MODE:
-                    print(f"⚠️  认证失败，尝试下一个路径: {e}")
-                continue
+            return self.jwt_token
 
-        # 所有路径均失败时，进入演示兜底模式
-        print(f"❌ [Heidi API] 认证失败: {last_error}")
-        print("⚠️ [演示模式] 切换到模拟 Token 以继续流程...")
-        self.jwt_token = "MOCK_TOKEN_FOR_DEMO"
-        self.token_expiry = time.time() + 3600
-        return self.jwt_token
+        except Exception as e:
+            # 认证失败时，进入演示兜底模式
+            print(f"❌ [Heidi API] 认证失败: {e}")
+            print("⚠️ [演示模式] 切换到模拟 Token 以继续流程...")
+            self.jwt_token = "MOCK_TOKEN_FOR_DEMO"
+            self.token_expiry = time.time() + 3600
+            return self.jwt_token
 
     def _ensure_authenticated(self):
         """确保已认证（内部使用）"""
