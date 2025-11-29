@@ -203,6 +203,33 @@ class HeidiClient:
         if not self.jwt_token:
             self.authenticate()
 
+    def check_account_link_status(self) -> Dict[str, Any]:
+        """
+        [v5.0 新增] 检查账号绑定状态
+        用于启动时自检，确保 API 能正常创建病人
+        """
+        self._ensure_authenticated()
+        url = f"{self.base_url}/users/linked-account/access"
+        headers = {"Authorization": f"Bearer {self.jwt_token}"}
+        try:
+            resp = self.session.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+            if resp.status_code == 200:
+                return resp.json()
+            # 如果返回 404 或其他状态，假设未绑定
+            return {"is_linked": False, "status_code": resp.status_code}
+        except Exception as e:
+            if DEBUG_MODE:
+                print(f"⚠️ 检查绑定状态失败: {e}")
+            return {"is_linked": False, "error": str(e)}
+
+    def generate_link_url(self) -> str:
+        """
+        [v5.0 新增] 生成 Heidi 账号绑定链接
+        用于引导用户完成账号关联
+        """
+        token = self.authenticate()
+        return f"https://scribe.heidihealth.com/widget?token={token}"
+
     def _make_api_request(self,
                           method: str,
                           endpoint: str,

@@ -386,3 +386,120 @@ class AINavigator:
         }
         """
         return self._call_claude(self._encode_pil_image(img), prompt)
+
+    # =========================================================
+    # v5.0 别名方法 (兼容新接口)
+    # =========================================================
+
+    def extract_batch_data(self, screenshot_path: str) -> List[Dict]:
+        """[v5.0 别名] 从列表页直接提取所有数据"""
+        return self.extract_patient_list_data(screenshot_path)
+
+    def extract_details(self, screenshot_path: str) -> Optional[Dict]:
+        """[v5.0 别名] 从详情页提取完整信息"""
+        return self.extract_profile_details(screenshot_path)
+
+    # =========================================================
+    # v8.0 新方法 - Chrome 注入 + 精准导航
+    # =========================================================
+
+    def find_text_coordinates(self, screenshot_path: str, text_content: str) -> Optional[Tuple[int, int]]:
+        """
+        定位屏幕上特定的文字/按钮/标签页
+        用于找 "Consultations" 等 UI 元素
+        """
+        img = Image.open(screenshot_path)
+        prompt = f"""
+        Find the clickable Text/Tab/Button labeled **"{text_content}"**.
+        Output JSON with relative coordinates (0.0-1.0):
+        {{ "found": true, "x": 0.5, "y": 0.5 }}
+        """
+        data = self._call_claude(self._encode_pil_image(img), prompt)
+
+        if data and data.get("found"):
+            return int(data["x"] * self.screen_w), int(data["y"] * self.screen_h)
+        return None
+
+    def extract_consultation_content(self, screenshot_path: str) -> str:
+        """
+        提取咨询页面的详细文本 (OCR 模式)
+        """
+        if not self.client:
+            console.print("[red]❌ AI 客户端未初始化[/red]")
+            return ""
+
+        img = Image.open(screenshot_path)
+        b64 = self._encode_pil_image(img)
+        try:
+            resp = self.client.messages.create(
+                model=self.model,
+                max_tokens=2048,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64}},
+                        {"type": "text", "text": "OCR Extract: Read all medical notes, diagnosis, and history from this 'Consultations' view. Return plain text only."}
+                    ]
+                }]
+            )
+            return resp.content[0].text
+        except Exception as e:
+            console.print(f"[red]AI Error: {e}[/red]")
+            return ""
+
+    def extract_patient_list_for_schedule(self, screenshot_path: str) -> List[Dict]:
+        """
+        从列表页提取用于生成 Schedule 的数据
+        返回格式适合直接注入 Web 界面
+        """
+        img = Image.open(screenshot_path)
+        b64 = self._encode_pil_image(img)
+
+        prompt = """
+        Analyze this EMR patient list.
+        Extract data for scheduling purposes.
+
+        Return JSON array:
+        [
+            {"name": "Diana Rossi", "date": "2024-01-15", "time": "09:00", "type": "Follow-up"},
+            ...
+        ]
+        """
+        data = self._call_claude(b64, prompt)
+        if data and isinstance(data, list):
+            return data
+        if data and "patients" in data:
+            return data["patients"]
+        return []
+
+    def extract_medical_context(self, screenshot_path: str) -> str:
+        """
+        从病历详情页提取完整的医疗上下文文本
+        用于注入 Web 界面的 Context 输入框
+        """
+        if not self.client:
+            console.print("[red]❌ AI 客户端未初始化[/red]")
+            return ""
+
+        img = Image.open(screenshot_path)
+        b64 = self._encode_pil_image(img)
+        try:
+            resp = self.client.messages.create(
+                model=self.model,
+                max_tokens=4096,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64}},
+                        {"type": "text", "text": """
+                        Extract ALL visible medical information from this patient record.
+                        Include: patient name, DOB, diagnosis, medications, history, notes, consultations.
+                        Format as clean readable text for clinical context.
+                        """}
+                    ]
+                }]
+            )
+            return resp.content[0].text
+        except Exception as e:
+            console.print(f"[red]AI Error: {e}[/red]")
+            return ""

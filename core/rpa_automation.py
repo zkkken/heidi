@@ -5,6 +5,8 @@ RPA 自动化模块 - 端到端自动化流程
 
 import time
 import subprocess
+import math
+import json
 import pyautogui
 from typing import Dict, List, Optional, Tuple
 from pathlib import Path
@@ -15,6 +17,22 @@ from .capture import capture_full_screen
 from .ocr_parser import run_ocr
 from .smart_capture import smart_capture_and_extract
 from .ai_locator import AINavigator
+from .web_bridge import WebBridge
+
+# ==========================================
+# 🎯 硬坐标配置 (Golden Anchors)
+# 请填入您通过 tools/get_mouse_pos.py 获取的坐标
+# ==========================================
+# 示例：Diana Rossi 的名字位置 (第一个病人)
+# 最新实测：
+#   - Name (第一行病人): (600, 580)
+#   - Consultations/Tab 区域: (775, 427)
+HARD_COORDS_FIRST_PATIENT = (600, 580)
+HARD_COORDS_CONSULTATIONS = (775, 427)
+
+# 安全阈值 (像素)：如果 AI 坐标和硬坐标距离超过这个值，判定为 AI 找歪了
+SAFE_THRESHOLD = 150
+# ==========================================
 
 
 class WindowDetector:
@@ -441,6 +459,9 @@ class RPAWorkflow:
         # [配置] 控制是否开启循环。设为 1 即为单次提取模式（最快）
         self.max_extraction_loops = 1
 
+        # v8.0 - WebBridge for Chrome injection
+        self.web = WebBridge()
+
         # 初始化 Navigator 和 Client
         self.navigator = AINavigator()
         from .heidi_client import HeidiClient
@@ -836,6 +857,374 @@ class RPAWorkflow:
             self._upload_to_heidi(full_data)
         else:
             console.print("[red]❌ 详情提取失败[/red]")
+
+    # =========================================================
+    # v5.0 智能自检 + 整合方法
+    # =========================================================
+
+    def _ensure_connected(self):
+        """
+        [v5.0 自检] 确保 Heidi 账号已绑定
+        未绑定时自动生成链接并等待用户完成
+        """
+        from rich.console import Console
+        from .heidi_client import HeidiAPIError
+        console = Console()
+
+        try:
+            status = self.client.check_account_link_status()
+            if status.get("is_linked"):
+                console.print("[green]✅ Heidi 账号连接正常[/green]")
+                return True
+
+            # 未绑定，生成链接
+            console.print("\n[bold red]🚨 账号未绑定！[/bold red]")
+            link_url = self.client.generate_link_url()
+            console.print(f"请在浏览器打开此链接登录 Heidi:\n[cyan]{link_url}[/cyan]")
+            input("\n登录完成后，按回车键继续...")
+
+            # 二次检查
+            status2 = self.client.check_account_link_status()
+            if status2.get("is_linked"):
+                console.print("[green]✅ 绑定成功！[/green]")
+                return True
+            else:
+                console.print("[yellow]⚠️ 绑定状态未确认，将继续尝试...[/yellow]")
+                return True  # 仍然尝试继续
+
+        except Exception as e:
+            console.print(f"[yellow]⚠️ 状态检查失败: {e}，将继续尝试...[/yellow]")
+            return True
+
+    def run_batch_all(self):
+        """
+        [v5.0 模式1] 批量识别 -> 确认 -> 批量上传
+        带智能自检功能
+        """
+        from rich.console import Console
+        from rich.table import Table
+        console = Console()
+
+        # 自检
+        self._ensure_connected()
+
+        console.print("\n[bold cyan]🚀 执行批量建档...[/bold cyan]")
+
+        # 截图并识别
+        screen = capture_full_screen()
+        patients = self.navigator.extract_batch_data(screen)
+
+        if not patients:
+            console.print("[red]未发现病人数据[/red]")
+            return
+
+        # 展示预览
+        table = Table(title=f"待处理清单 ({len(patients)})")
+        table.add_column("姓名", style="cyan")
+        table.add_column("生日", style="green")
+        table.add_column("性别", style="yellow")
+
+        for p in patients:
+            name = f"{p.get('first_name', '')} {p.get('last_name', '')}"
+            table.add_row(name, p.get('birth_date', ''), p.get('gender', ''))
+
+        console.print(table)
+
+        # 确认后上传
+        if input("\n确认上传? (y/n): ").strip().lower() == 'y':
+            success = 0
+            for p in patients:
+                console.print(f"正在处理: {p.get('first_name', '')} {p.get('last_name', '')}...")
+                if self._upload_to_heidi(p):
+                    success += 1
+                time.sleep(0.5)
+            console.print(f"\n[bold green]✨ 批量处理完成！成功: {success}/{len(patients)}[/bold green]")
+        else:
+            console.print("[yellow]已取消[/yellow]")
+
+    def run_smart_single(self):
+        """
+        [v5.0 模式2] 精准点击 -> 详情提取 -> 上传
+        带智能自检功能
+        """
+        from rich.console import Console
+        console = Console()
+
+        # 自检
+        self._ensure_connected()
+
+        console.print("\n[bold cyan]🎯 执行精准深挖...[/bold cyan]")
+
+        # 1. 找第一个人
+        screen = capture_full_screen()
+        coords = self.navigator.locate_patient_precise(screen, "First Patient Name")
+
+        if not coords:
+            console.print("[red]定位失败[/red]")
+            return
+
+        # 2. 点击
+        x, y = coords
+        console.print(f"👉 点击坐标 ({x}, {y})")
+        pyautogui.moveTo(x, y, duration=0.8, tween=pyautogui.easeInOutQuad)
+        pyautogui.click()
+
+        console.print("[dim]等待加载 (3s)...[/dim]")
+        time.sleep(3)
+
+        # 3. 提取详情
+        console.print("📸 读取详情页...")
+        detail_screen = capture_full_screen()
+        data = self.navigator.extract_details(detail_screen)
+
+        if data:
+            console.print("[green]详情提取成功[/green]")
+            self._upload_to_heidi(data)
+        else:
+            console.print("[red]提取失败[/red]")
+
+    # =========================================================
+    # v5.1 智能纠偏模式 (Anchor-based Deviation Check)
+    # =========================================================
+
+    def _calculate_distance(self, p1: Tuple[int, int], p2: Tuple[int, int]) -> float:
+        """计算两点之间的距离"""
+        return math.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
+
+    def _process_detail_page(self):
+        """详情页提取逻辑"""
+        from rich.console import Console
+        console = Console()
+
+        console.print("📸 读取详情页数据...")
+        detail_screen = capture_full_screen()
+
+        data = self.navigator.extract_profile_details(detail_screen)
+
+        if data:
+            console.print("[green]✅ 提取成功[/green]")
+            self._upload_to_heidi(data)
+        else:
+            console.print("[red]❌ 提取失败[/red]")
+
+    def run_smart_click_auto(self, hard_coords: Tuple[int, int] = None):
+        """
+        [智能纠偏模式]
+        1. AI 尝试定位
+        2. 计算与硬坐标的偏差
+        3. 自动决策 (AI vs 硬坐标)
+        4. 自动点击 (无人工确认)
+
+        参数:
+            hard_coords: 硬编码坐标，如果为 None 则使用全局配置
+        """
+        from rich.console import Console
+        console = Console()
+
+        # 使用传入的坐标或全局配置
+        anchor = hard_coords or HARD_COORDS_FIRST_PATIENT
+
+        self._ensure_connected()
+        console.print("\n[bold cyan]⚡ 启动智能点击 (自动纠偏模式)[/bold cyan]")
+
+        # 1. 截图与 AI 分析
+        screen_path = capture_full_screen()
+        ai_coords = self.navigator.locate_patient_precise(screen_path, "First Patient Name")
+
+        final_x, final_y = 0, 0
+
+        # 2. 决策逻辑
+        if ai_coords:
+            ax, ay = ai_coords
+            hx, hy = anchor
+
+            distance = self._calculate_distance((ax, ay), (hx, hy))
+
+            console.print(f"🔍 分析: AI({ax},{ay}) vs 硬坐标({hx},{hy}) | 偏差: {int(distance)}px")
+
+            if distance > SAFE_THRESHOLD:
+                console.print(f"[yellow]⚠️ 偏差 > {SAFE_THRESHOLD}px，判定 AI 找歪了！[/yellow]")
+                console.print("[bold green]🔧 触发自动纠偏 -> 使用硬坐标[/bold green]")
+                final_x, final_y = hx, hy
+            else:
+                console.print("[green]✅ 偏差在安全范围内，信任 AI (适应窗口微移)[/green]")
+                final_x, final_y = ax, ay
+        else:
+            console.print("[red]❌ AI 定位失败[/red]")
+            console.print("[bold green]🔧 触发保底机制 -> 使用硬坐标[/bold green]")
+            final_x, final_y = anchor
+
+        # 3. 自动执行 (No Input)
+        console.print(f"👉 自动点击: ({final_x}, {final_y})")
+
+        # 移动鼠标 (带动画让人眼能跟上)
+        pyautogui.moveTo(final_x, final_y, duration=0.6, tween=pyautogui.easeInOutQuad)
+        pyautogui.click()
+
+        console.print("[dim]⏳ 等待详情页加载 (3s)...[/dim]")
+        time.sleep(3)
+
+        # 4. 进入详情页提取流程
+        self._process_detail_page()
+
+    # =========================================================
+    # v8.0 Chrome 注入 + 双重纠偏
+    # =========================================================
+
+    def _smart_click_with_correction(self, step_name: str, ai_coords: tuple, hard_coords: tuple):
+        """
+        [核心逻辑] 智能纠偏点击器 - 增强版
+        偏差过大时先移到 AI 位置展示，等待 2 秒后纠正到硬坐标
+        """
+        from rich.console import Console
+        console = Console()
+
+        final_x, final_y = hard_coords
+
+        if ai_coords:
+            dist = self._calculate_distance(ai_coords, hard_coords)
+            console.print(f"🔍 {step_name}: AI({ai_coords[0]},{ai_coords[1]}) vs 硬坐标({hard_coords[0]},{hard_coords[1]}) | 偏差: {int(dist)}px")
+
+            if dist > SAFE_THRESHOLD:
+                # 触发纠偏逻辑
+                console.print(f"[yellow]⚠️ 偏差过大 (> {SAFE_THRESHOLD}px)，准备纠正...[/yellow]")
+
+                # 1. 先移到 AI 认为的地方 (展示一下)
+                pyautogui.moveTo(ai_coords[0], ai_coords[1], duration=0.3)
+
+                # 2. 显式等待 2 秒
+                console.print("[bold red]⏳ 正在执行 AI 二次识别纠正 (等待 2s)...[/bold red]")
+                time.sleep(2)
+
+                # 3. 拉回硬坐标
+                console.print(f"[bold green]🔧 纠正至硬坐标: {hard_coords}[/bold green]")
+                pyautogui.moveTo(hard_coords[0], hard_coords[1], duration=0.5, tween=pyautogui.easeInOutQuad)
+                final_x, final_y = hard_coords
+            else:
+                # 偏差很小，信任 AI (适应窗口微移)
+                console.print("[green]✅ 坐标精准，执行操作[/green]")
+                final_x, final_y = ai_coords
+        else:
+            console.print("[red]❌ AI 未找到目标，直接使用硬坐标保底[/red]")
+            pyautogui.moveTo(hard_coords[0], hard_coords[1], duration=0.5)
+            final_x, final_y = hard_coords
+
+        # 执行点击
+        pyautogui.click(final_x, final_y)
+
+    def run_precise_consultations_pipeline(self):
+        """
+        [v8.0 模式] 精准控制流程：病人 -> Consultations -> 提取 -> 注入 Web
+        """
+        from rich.console import Console
+        console = Console()
+
+        console.print("\n[bold cyan]🎯 启动精准控制流程 (Consultations -> Web)[/bold cyan]")
+        console.print("[dim]请确保 EMR 窗口位置固定，且显示病人列表[/dim]")
+
+        # === 步骤 1: 点击第一个病人 ===
+        console.print("\n[bold]Step 1: 定位第一个病人[/bold]")
+        screen = capture_full_screen()
+
+        # AI 尝试找
+        ai_pt = self.navigator.locate_patient_precise(screen, "First Patient Name in List")
+
+        # 执行智能点击 (含纠偏)
+        self._smart_click_with_correction("病人定位", ai_pt, HARD_COORDS_FIRST_PATIENT)
+
+        console.print("[dim]等待详情页加载 (3s)...[/dim]")
+        time.sleep(3)
+
+        # === 步骤 2: 点击 CONSULTATIONS 标签 ===
+        console.print("\n[bold]Step 2: 定位 Consultations[/bold]")
+        screen_detail = capture_full_screen()
+
+        # AI 尝试找 "Consultations"
+        ai_tab = self.navigator.find_text_coordinates(screen_detail, "Consultations")
+
+        # 执行智能点击 (含纠偏)
+        self._smart_click_with_correction("Tab 定位", ai_tab, HARD_COORDS_CONSULTATIONS)
+
+        console.print("[dim]等待咨询页加载 (3s)...[/dim]")
+        time.sleep(3)
+
+        # === 步骤 3: 提取内容 ===
+        console.print("\n[bold]Step 3: 提取内容[/bold]")
+        final_screen = capture_full_screen()
+
+        content = self.navigator.extract_consultation_content(final_screen)
+        safe_content = content.replace('\n', '\\n').replace('"', '\\"')  # JS 安全转义
+
+        console.print(f"[green]✅ 提取完成 ({len(content)} 字符)[/green]")
+
+        # === 步骤 4: 注入 Web ===
+        if input("👉 按 Enter 注入 Web (n 退出): ").strip().lower() != 'n':
+            self.web.inject_single_context(safe_content)
+
+    def run_batch_pipeline(self):
+        """
+        [v8.0 模式] 批量日程：EMR 列表 -> AI 提取 JSON -> Chrome JS 注入
+        """
+        from rich.console import Console
+        console = Console()
+
+        console.print("\n[bold cyan]🚀 启动：批量 EMR 读取 -> Web 生成[/bold cyan]")
+        console.print("[dim]请确保：1. EMR 列表可见  2. Chrome 已打开 localhost:3000[/dim]")
+
+        # 1. EMR 视觉读取
+        screen = capture_full_screen()
+        console.print("🔍 AI 正在读取 EMR 列表...")
+        schedule_data = self.navigator.extract_patient_list_for_schedule(screen)
+
+        if not schedule_data:
+            console.print("[red]❌ 未提取到数据[/red]")
+            return
+
+        json_str = json.dumps(schedule_data, ensure_ascii=False, indent=2)
+        console.print(f"[green]✅ 提取成功 ({len(schedule_data)} 人)[/green]")
+        console.print(f"[dim]{json_str[:200]}...[/dim]")
+
+        # 2. Chrome 极速注入
+        if input("👉 按 Enter 立即注入 Web (n 退出): ").strip().lower() != 'n':
+            self.web.inject_batch_schedule(json_str)
+
+    def run_single_pipeline(self):
+        """
+        [v8.0 模式] 单人病历：EMR 点击 -> AI 提取文本 -> Chrome JS 注入
+        """
+        from rich.console import Console
+        console = Console()
+
+        console.print("\n[bold cyan]🎯 启动：精准点击 -> Context 注入[/bold cyan]")
+
+        # 1. 视觉定位 & 点击
+        screen = capture_full_screen()
+        coords = self.navigator.locate_patient_precise(screen, "First Patient Name")
+
+        if not coords:
+            console.print("[red]❌ EMR 定位失败[/red]")
+            return
+
+        console.print(f"👉 点击 EMR 坐标: {coords}")
+        pyautogui.moveTo(coords[0], coords[1], duration=0.5)
+        pyautogui.click()
+
+        console.print("[dim]等待病历加载 (3s)...[/dim]")
+        time.sleep(3)
+
+        # 2. 提取病历文本
+        console.print("🔍 AI 正在读取病历详情...")
+        detail_screen = capture_full_screen()
+        context_text = self.navigator.extract_medical_context(detail_screen)
+
+        # 清理文本中的换行符，防止 JS 报错
+        safe_context = context_text.replace('\n', '\\n').replace('"', '\\"')
+
+        console.print(f"[green]✅ 提取文本 ({len(context_text)} 字)[/green]")
+
+        # 3. Chrome 极速注入
+        if input("👉 按 Enter 立即注入 Web (n 退出): ").strip().lower() != 'n':
+            self.web.inject_single_context(safe_context)
 
     def step1_launch_applications(self) -> bool:
         """
