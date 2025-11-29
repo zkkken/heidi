@@ -438,6 +438,9 @@ class RPAWorkflow:
         self.emr_app_path = emr_app_path
         self.heidi_url = heidi_url or HEIDI_WEB_URL
 
+        # [配置] 控制是否开启循环。设为 1 即为单次提取模式（最快）
+        self.max_extraction_loops = 1
+
     def step1_launch_applications(self) -> bool:
         """
         步骤 1: 启动 EMR 和 Heidi 浏览器
@@ -587,6 +590,99 @@ class RPAWorkflow:
             console.print(f"[red]❌ 提取失败: {result.get('error')}[/red]")
             return result
 
+    def step3_ai_extract_smart(self) -> Dict:
+        """
+        [Step 3] 智能提取 (支持单次或循环)
+
+        返回:
+            Dict: {
+                "success": bool,
+                "patient_info": Dict,
+                "screenshot_path": str
+            }
+        """
+        from rich.console import Console
+        console = Console()
+
+        navigator = AINavigator()
+        collected_data = {}
+        loop_count = 0
+        screenshot_path = None
+
+        mode_text = "单次" if self.max_extraction_loops == 1 else f"循环(最多{self.max_extraction_loops}次)"
+        console.print(f"\n[bold cyan]📸 步骤 3: AI 智能提取数据 (模式: {mode_text})[/bold cyan]")
+
+        while loop_count < self.max_extraction_loops:
+            loop_count += 1
+            if self.max_extraction_loops > 1:
+                console.print(f"\n[cyan]--- 采集轮次 {loop_count}/{self.max_extraction_loops} ---[/cyan]")
+
+            # 1. 截图
+            screenshot_path = capture_full_screen()
+            if DEBUG_MODE:
+                console.print(f"[dim]截图路径: {screenshot_path}[/dim]")
+
+            # 2. AI 分析
+            result = navigator.extract_page_data(screenshot_path, collected_data)
+
+            # 3. 数据合并
+            new_info = result.get("patient_info", {})
+            if new_info:
+                # 简单的字典合并，只更新非空值
+                collected_data.update({k: v for k, v in new_info.items() if v})
+                console.print(f"[green]✅ 已提取字段: {list(new_info.keys())}[/green]")
+
+            # 4. 判断下一步
+            action = result.get("next_action", {})
+            action_type = action.get("type", "finish")
+            is_complete = result.get("is_complete", False)
+
+            # 单次模式下的快速退出
+            if self.max_extraction_loops == 1:
+                console.print("[green]✅ 单次提取完成[/green]")
+                break
+
+            # 循环模式下的逻辑
+            if is_complete or action_type == "finish":
+                console.print("[green]✅ AI 判定数据收集完成[/green]")
+                break
+
+            # 执行 AI 指示的额外操作 (翻页/点击)
+            if action_type == "click":
+                cx, cy = action.get("x"), action.get("y")
+                if cx and cy:
+                    console.print(f"[cyan]👉 AI 导航点击: ({cx}, {cy}) - {action.get('reason', '')}[/cyan]")
+                    pyautogui.moveTo(cx, cy, duration=0.3)
+                    pyautogui.click()
+                    time.sleep(2)
+                else:
+                    console.print("[yellow]⚠️  AI 返回点击操作但缺少坐标[/yellow]")
+                    break
+            elif action_type == "scroll":
+                scroll_amount = action.get("amount", -500)
+                console.print(f"[cyan]👇 AI 导航滚动: {scroll_amount} - {action.get('reason', '')}[/cyan]")
+                pyautogui.scroll(scroll_amount)
+                time.sleep(1)
+
+        # 最终检查
+        if collected_data:
+            console.print(f"\n[green]✅ 数据提取流程结束，共收集 {len(collected_data)} 个字段[/green]")
+            if DEBUG_MODE:
+                console.print(f"[dim]提取数据: {collected_data}[/dim]")
+
+            return {
+                "success": True,
+                "patient_info": collected_data,
+                "screenshot_path": screenshot_path
+            }
+        else:
+            console.print("[red]❌ 未提取到有效数据[/red]")
+            return {
+                "success": False,
+                "error": "未提取到有效数据",
+                "patient_info": {}
+            }
+
     def step4_send_to_heidi(self, patient_data: Dict) -> bool:
         """
         步骤 4: 将数据发送到 Heidi
@@ -686,12 +782,12 @@ class RPAWorkflow:
                 return result
             result["steps_completed"].append("step2_ai_click")
 
-            # 步骤 3: 截图并提取
-            extraction_result = self.step3_screenshot_and_extract()
+            # 步骤 3: AI 智能提取 (单次或循环模式)
+            extraction_result = self.step3_ai_extract_smart()
             if not extraction_result["success"]:
                 result["error"] = f"步骤 3 失败: {extraction_result.get('error')}"
                 return result
-            result["steps_completed"].append("step3_extract")
+            result["steps_completed"].append("step3_ai_extract")
             result["patient_data"] = extraction_result["patient_info"]
 
             # 步骤 4: 发送到 Heidi
