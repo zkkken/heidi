@@ -26,8 +26,8 @@ def main():
         while True:
             console.clear()
             console.print(Panel.fit(
-                "[bold cyan]🏥 Heidi EMR Automation v8.0[/bold cyan]\n"
-                "[dim]Hard Coords: Active | Chrome Injection: Enabled[/dim]\n\n"
+                "[bold cyan]🏥 Heidi EMR Automation v8.1[/bold cyan]\n"
+                "[dim]Robust Click: Active | Chrome Injection: Enabled[/dim]\n\n"
                 "[1] 📋 [bold]批量日程 (Batch -> Web)[/bold]\n"
                 "    EMR 列表读取 -> 生成 JSON -> Chrome 注入\n\n"
                 "[2] 🎯 [bold]精准 Consultations[/bold] [green]推荐[/green]\n"

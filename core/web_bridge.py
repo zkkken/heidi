@@ -1,6 +1,6 @@
 """
 core/web_bridge.py
-Chrome Direct Injector - 使用 macOS AppleScript 直接操控浏览器 DOM
+Web Injector v3.0 - React-Compatible JS Injection (无鼠标纯代码版)
 """
 import subprocess
 import time
@@ -10,11 +10,11 @@ console = Console()
 
 
 class WebBridge:
-    def _run_applescript(self, js_code: str) -> bool:
+    def _run_applescript(self, js_code: str):
         """
-        通过 AppleScript 在当前 Chrome 活动标签页执行 JS
+        通过 AppleScript 在 Chrome 执行 JS
         """
-        # 转义 JS 代码中的双引号和反斜杠，防止 AppleScript 报错
+        # 转义 JS 代码中的双引号和反斜杠
         js_safe = js_code.replace('\\', '\\\\').replace('"', '\\"')
 
         script = f'''
@@ -25,9 +25,10 @@ class WebBridge:
         end tell
         '''
         try:
+            # 这里的 capture_output=True 会捕获错误，如果没报错但没反应，通常是 JS 逻辑问题
             result = subprocess.run(['osascript', '-e', script], capture_output=True, text=True)
             if result.returncode != 0:
-                console.print(f"[red]注入失败: {result.stderr}[/red]")
+                console.print(f"[red]AppleScript 错误: {result.stderr}[/red]")
                 return False
             return True
         except Exception as e:
@@ -35,109 +36,92 @@ class WebBridge:
             return False
 
     def focus_chrome(self):
-        """将 Chrome 窗口置顶"""
-        script = 'tell application "Google Chrome" to activate'
-        subprocess.run(['osascript', '-e', script])
-        time.sleep(0.5)
+        """激活 Chrome"""
+        subprocess.run(['osascript', '-e', 'tell application "Google Chrome" to activate'])
+        time.sleep(0.2)
 
     def inject_batch_schedule(self, json_data: str):
         """
-        [批量模式] 注入 JSON 并点击生成
-        目标：左侧 Textarea + "生成 Schedule" 按钮
+        [批量模式] 注入 JSON
         """
-        # 转义 JSON 中的特殊字符
-        safe_json = json_data.replace('\\', '\\\\').replace('`', '\\`').replace('$', '\\$')
-
+        # React 专用注入脚本
         js = f'''
         (function() {{
-            // 1. 找输入框 (假设页面左侧主要是一个 Textarea)
-            var textareas = document.querySelectorAll('textarea');
-            var input = textareas[0]; // 默认取第一个
+            console.log("RPA: 开始注入 Batch 数据...");
+
+            // 1. 找输入框 (策略: 找页面上第一个 visible 的 textarea)
+            var textareas = Array.from(document.querySelectorAll('textarea'));
+            var input = textareas.find(t => t.offsetParent !== null); // 找可见的
+
+            if (!input) input = textareas[0]; // 保底
 
             if (input) {{
-                input.value = `{safe_json}`;
-                // 触发 React/Vue 的输入事件
+                // ★★★ 核心修复：React 兼容写法 ★★★
+                var nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+                nativeInputValueSetter.call(input, `{json_data}`);
+
+                // 必须触发 input 事件，React 才会监听到变化
                 input.dispatchEvent(new Event('input', {{ bubbles: true }}));
                 input.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                console.log("RPA: 数据注入成功");
             }} else {{
-                console.log("RPA Error: 找不到输入框");
-                return;
+                console.error("RPA: 未找到 Textarea");
+                alert("RPA Error: 找不到输入框");
             }}
 
-            // 2. 找按钮 (通过文字内容)
-            var buttons = document.querySelectorAll('button');
-            var targetBtn = Array.from(buttons).find(b => b.textContent.includes("生成 Schedule") || b.textContent.includes("Generate"));
+            // 2. 找按钮并点击
+            setTimeout(() => {{
+                var buttons = Array.from(document.querySelectorAll('button'));
+                var targetBtn = buttons.find(b => b.innerText.includes("生成 Schedule") || b.innerText.includes("Generate"));
 
-            if (targetBtn) {{
-                setTimeout(() => targetBtn.click(), 200);
-            }} else {{
-                console.log("RPA Warning: 找不到'生成 Schedule'按钮");
-            }}
+                if (targetBtn) {{
+                    targetBtn.click();
+                    console.log("RPA: 按钮已点击");
+                }} else {{
+                    console.error("RPA: 未找到生成按钮");
+                }}
+            }}, 200); // 稍微延迟，确保数据已同步
         }})();
         '''
         self.focus_chrome()
         self._run_applescript(js)
-        console.print("[green]⚡️ 数据已光速注入 Web 界面[/green]")
+        console.print("[green]⚡️ JS 指令已发送 (React 模式)[/green]")
 
     def inject_single_context(self, context_text: str):
         """
-        [精准模式] 注入 Context 并点击填入
-        目标：右侧 Textarea + "填入 Context" 按钮
+        [精准模式] 注入 Context
         """
-        # 转义特殊字符
-        safe_text = context_text.replace('\\', '\\\\').replace('`', '\\`').replace('$', '\\$')
-
         js = f'''
         (function() {{
-            // 1. 找输入框 (策略：找第二个 textarea，或者 placeholder 包含 '详细内容' 的)
-            var textareas = document.querySelectorAll('textarea');
-            // 通常第二个 textarea 是右边的 Context 输入框
-            var input = textareas.length > 1 ? textareas[1] : textareas[0];
+            console.log("RPA: 开始注入 Context...");
+
+            // 1. 找输入框 (策略: 找第二个 textarea，或者 placeholder 包含 Context 的)
+            var textareas = Array.from(document.querySelectorAll('textarea'));
+            // 假设布局是：左边一个(Batch)，右边一个(Context) -> 取最后一个
+            var input = textareas[textareas.length - 1];
 
             if (input) {{
-                input.value = `{safe_text}`;
+                // ★★★ 核心修复：React 兼容写法 ★★★
+                var nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+                nativeInputValueSetter.call(input, `{context_text}`);
+
                 input.dispatchEvent(new Event('input', {{ bubbles: true }}));
                 input.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                console.log("RPA: Context 注入成功");
             }}
 
             // 2. 找按钮
-            var buttons = document.querySelectorAll('button');
-            var targetBtn = Array.from(buttons).find(b => b.textContent.includes("填入 Context") || b.textContent.includes("Update Context") || b.textContent.includes("Submit"));
+            setTimeout(() => {{
+                var buttons = Array.from(document.querySelectorAll('button'));
+                var targetBtn = buttons.find(b => b.innerText.includes("填入 Context") || b.innerText.includes("Update"));
 
-            if (targetBtn) {{
-                setTimeout(() => targetBtn.click(), 200);
-            }}
+                if (targetBtn) {{
+                    targetBtn.click();
+                    console.log("RPA: 按钮已点击");
+                }}
+            }}, 200);
         }})();
         '''
         self.focus_chrome()
         self._run_applescript(js)
-        console.print("[green]⚡️ Context 已注入 Web 界面[/green]")
-
-    def inject_text_to_input(self, text: str, input_selector: str = "textarea", button_text: str = None):
-        """
-        [通用方法] 注入文本到指定输入框
-        """
-        safe_text = text.replace('\\', '\\\\').replace('`', '\\`').replace('$', '\\$')
-
-        button_js = ""
-        if button_text:
-            button_js = f'''
-            var buttons = document.querySelectorAll('button');
-            var targetBtn = Array.from(buttons).find(b => b.textContent.includes("{button_text}"));
-            if (targetBtn) {{ setTimeout(() => targetBtn.click(), 200); }}
-            '''
-
-        js = f'''
-        (function() {{
-            var input = document.querySelector('{input_selector}');
-            if (input) {{
-                input.value = `{safe_text}`;
-                input.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                input.dispatchEvent(new Event('change', {{ bubbles: true }}));
-            }}
-            {button_js}
-        }})();
-        '''
-        self.focus_chrome()
-        self._run_applescript(js)
-        console.print("[green]⚡️ 数据已注入[/green]")
+        console.print("[green]⚡️ JS 指令已发送 (React 模式)[/green]")

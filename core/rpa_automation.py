@@ -19,19 +19,25 @@ from .smart_capture import smart_capture_and_extract
 from .ai_locator import AINavigator
 from .web_bridge import WebBridge
 
+# 关闭默认 failsafe，避免鼠标到屏幕角落触发异常；如需安全开关可改回 True
+pyautogui.FAILSAFE = False
+
 # ==========================================
 # 🎯 硬坐标配置 (Golden Anchors)
 # 请填入您通过 tools/get_mouse_pos.py 获取的坐标
 # ==========================================
 # 示例：Diana Rossi 的名字位置 (第一个病人)
 # 最新实测：
-#   - Name (第一行病人): (600, 580)
-#   - Consultations/Tab 区域: (775, 427)
-HARD_COORDS_FIRST_PATIENT = (600, 580)
-HARD_COORDS_CONSULTATIONS = (775, 427)
+#   - Name (第一行病人): (1322, 412)
+#   - Consultations/Tab 区域: (1317, 250)
+HARD_COORDS_FIRST_PATIENT = (1322, 412)
+HARD_COORDS_CONSULTATIONS = (1317, 250)
 
 # 安全阈值 (像素)：如果 AI 坐标和硬坐标距离超过这个值，判定为 AI 找歪了
 SAFE_THRESHOLD = 150
+
+# [v8.1] 偏差阈值 - 更严格的检测标准
+DEVIATION_THRESHOLD = 50
 # ==========================================
 
 
@@ -475,6 +481,40 @@ class RPAWorkflow:
         # MacOS: Command + [
         pyautogui.hotkey('command', '[')
         time.sleep(3)
+
+    def _robust_click(self, x: int, y: int):
+        """
+        [Ultra-Robust] 强力点击逻辑 v2
+        策略：移动 -> 晃动激活 Hover -> 按下 -> 停顿0.3秒 -> 松开
+        """
+        from rich.console import Console
+        console = Console()
+
+        # 1. 移动到位 (带缓动，模拟人手)
+        console.print(f"[dim]鼠标移动 -> ({x}, {y})[/dim]")
+        pyautogui.moveTo(x, y, duration=0.4, tween=pyautogui.easeInOutQuad)
+
+        # 2. 物理晃动 (幅度稍微加大一点，确保触发 Hover)
+        pyautogui.moveRel(3, 0)
+        time.sleep(0.1)
+        pyautogui.moveRel(-3, 0)
+        time.sleep(0.5)  # 给 UI 渲染 Hover 态留足时间
+
+        # 3. 执行"长按"点击 (这是解决无效点击的关键)
+        console.print("[bold green]👉 执行长按点击 (Press & Hold)[/bold green]")
+
+        # 按下
+        pyautogui.mouseDown(x, y, button='left')
+
+        # ★★★ 关键停顿：保持按下状态 0.3 秒 ★★★
+        time.sleep(0.3)
+
+        # 松开
+        pyautogui.mouseUp(x, y, button='left')
+
+        # 4. 双保险：如果 UI 反应慢，再补一个标准点击
+        time.sleep(0.2)
+        # pyautogui.click(x, y) # 如果上面的长按还不行，把这行注释打开试试
 
     def process_single_patient(self, deep_dive: bool = False) -> bool:
         """
@@ -1059,7 +1099,12 @@ class RPAWorkflow:
 
         # 移动鼠标 (带动画让人眼能跟上)
         pyautogui.moveTo(final_x, final_y, duration=0.6, tween=pyautogui.easeInOutQuad)
-        pyautogui.click()
+        time.sleep(0.1)  # 移动完成后稍停，避免系统拦截
+        # 明确左键按下/抬起，避免某些环境下 click 被拦截
+        pyautogui.mouseDown(button="left")
+        time.sleep(0.05)
+        pyautogui.mouseUp(button="left")
+        console.print("[dim]已执行左键点击[/dim]")
 
         console.print("[dim]⏳ 等待详情页加载 (3s)...[/dim]")
         time.sleep(3)
@@ -1073,8 +1118,8 @@ class RPAWorkflow:
 
     def _smart_click_with_correction(self, step_name: str, ai_coords: tuple, hard_coords: tuple):
         """
-        [核心逻辑] 智能纠偏点击器 - 增强版
-        偏差过大时先移到 AI 位置展示，等待 2 秒后纠正到硬坐标
+        [v8.1 核心逻辑] 智能纠偏点击器 + 鲁棒点击
+        偏差过大时先移到 AI 位置展示，然后纠正到硬坐标
         """
         from rich.console import Console
         console = Console()
@@ -1085,42 +1130,41 @@ class RPAWorkflow:
             dist = self._calculate_distance(ai_coords, hard_coords)
             console.print(f"🔍 {step_name}: AI({ai_coords[0]},{ai_coords[1]}) vs 硬坐标({hard_coords[0]},{hard_coords[1]}) | 偏差: {int(dist)}px")
 
-            if dist > SAFE_THRESHOLD:
+            if dist > DEVIATION_THRESHOLD:
                 # 触发纠偏逻辑
-                console.print(f"[yellow]⚠️ 偏差过大 (> {SAFE_THRESHOLD}px)，准备纠正...[/yellow]")
+                console.print(f"[yellow]⚠️ 偏差过大 (> {DEVIATION_THRESHOLD}px)，准备纠正...[/yellow]")
 
-                # 1. 先移到 AI 认为的地方 (展示一下)
-                pyautogui.moveTo(ai_coords[0], ai_coords[1], duration=0.3)
+                # 1. 演示 AI 的错误位置
+                pyautogui.moveTo(ai_coords[0], ai_coords[1], duration=0.2)
 
-                # 2. 显式等待 2 秒
-                console.print("[bold red]⏳ 正在执行 AI 二次识别纠正 (等待 2s)...[/bold red]")
-                time.sleep(2)
+                # 2. 短暂等待
+                console.print("[bold red]⏳ 正在执行硬坐标纠正 (等待 1s)...[/bold red]")
+                time.sleep(1)
 
                 # 3. 拉回硬坐标
                 console.print(f"[bold green]🔧 纠正至硬坐标: {hard_coords}[/bold green]")
-                pyautogui.moveTo(hard_coords[0], hard_coords[1], duration=0.5, tween=pyautogui.easeInOutQuad)
                 final_x, final_y = hard_coords
             else:
                 # 偏差很小，信任 AI (适应窗口微移)
-                console.print("[green]✅ 坐标精准，执行操作[/green]")
+                console.print("[green]✅ 坐标精准，信任 AI[/green]")
                 final_x, final_y = ai_coords
         else:
-            console.print("[red]❌ AI 未找到目标，直接使用硬坐标保底[/red]")
-            pyautogui.moveTo(hard_coords[0], hard_coords[1], duration=0.5)
+            console.print("[red]❌ AI 未找到目标，使用硬坐标保底[/red]")
             final_x, final_y = hard_coords
 
-        # 执行点击
-        pyautogui.click(final_x, final_y)
+        # 执行鲁棒点击
+        self._robust_click(final_x, final_y)
 
     def run_precise_consultations_pipeline(self):
         """
-        [v8.0 模式] 精准控制流程：病人 -> Consultations -> 提取 -> 注入 Web
+        [v8.1 模式] 精准控制流程：病人 -> Consultations -> 提取 -> 注入 Web
+        特性：鲁棒点击 + 自动注入
         """
         from rich.console import Console
         console = Console()
 
-        console.print("\n[bold cyan]🎯 启动精准控制流程 (Consultations -> Web)[/bold cyan]")
-        console.print("[dim]请确保 EMR 窗口位置固定，且显示病人列表[/dim]")
+        console.print("\n[bold cyan]🎯 启动精准控制流程 (v8.1)[/bold cyan]")
+        console.print("[dim]Target: EMR -> Web Injection[/dim]")
 
         # === 步骤 1: 点击第一个病人 ===
         console.print("\n[bold]Step 1: 定位第一个病人[/bold]")
@@ -1148,18 +1192,23 @@ class RPAWorkflow:
         console.print("[dim]等待咨询页加载 (3s)...[/dim]")
         time.sleep(3)
 
-        # === 步骤 3: 提取内容 ===
-        console.print("\n[bold]Step 3: 提取内容[/bold]")
+        # === 步骤 3: 提取内容并注入 ===
+        console.print("\n[bold]Step 3: 提取内容并注入[/bold]")
         final_screen = capture_full_screen()
 
+        console.print("🔍 AI 正在读取病历内容...")
         content = self.navigator.extract_consultation_content(final_screen)
-        safe_content = content.replace('\n', '\\n').replace('"', '\\"')  # JS 安全转义
 
+        if not content:
+            console.print("[red]⚠️ 未提取到文本内容，注入空字符串[/red]")
+            content = "No consultation notes found."
+
+        safe_content = content.replace('\n', '\\n').replace('"', '\\"')  # JS 安全转义
         console.print(f"[green]✅ 提取完成 ({len(content)} 字符)[/green]")
 
-        # === 步骤 4: 注入 Web ===
-        if input("👉 按 Enter 注入 Web (n 退出): ").strip().lower() != 'n':
-            self.web.inject_single_context(safe_content)
+        # === 步骤 4: 自动注入 Web ===
+        console.print("👉 正在注入 Web 界面...")
+        self.web.inject_single_context(safe_content)
 
     def run_batch_pipeline(self):
         """
