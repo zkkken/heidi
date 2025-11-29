@@ -10,10 +10,11 @@ from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 import re
 
-from .config import DEBUG_MODE
+from .config import DEBUG_MODE, HEIDI_WEB_URL
 from .capture import capture_full_screen
 from .ocr_parser import run_ocr
 from .smart_capture import smart_capture_and_extract
+from .ai_locator import AINavigator
 
 
 class WindowDetector:
@@ -426,16 +427,16 @@ class BrowserAutomation:
 class RPAWorkflow:
     """RPA 工作流程编排"""
 
-    def __init__(self, emr_app_path: Optional[str] = None, heidi_url: str = "https://www.heidihealth.com"):
+    def __init__(self, emr_app_path: Optional[str] = None, heidi_url: Optional[str] = None):
         """
         初始化 RPA 工作流
 
         参数:
             emr_app_path: EMR 应用程序路径（如果需要自动启动）
-            heidi_url: Heidi 网址
+            heidi_url: Heidi 网址（默认使用配置文件中的 HEIDI_WEB_URL）
         """
         self.emr_app_path = emr_app_path
-        self.heidi_url = heidi_url
+        self.heidi_url = heidi_url or HEIDI_WEB_URL
 
     def step1_launch_applications(self) -> bool:
         """
@@ -508,6 +509,57 @@ class RPAWorkflow:
         else:
             console.print("[red]❌ 未找到病人信息[/red]")
             console.print("[yellow]提示: 请确保 EMR 界面显示病人列表[/yellow]")
+            return False
+
+    def step2_ai_find_and_click_patient(self) -> bool:
+        """
+        步骤 2 (AI 增强版): 截图 -> AI 分析坐标 -> 本地点击
+
+        返回:
+            bool: 是否成功
+        """
+        from rich.console import Console
+        console = Console()
+
+        console.print("\n[bold cyan]🧠 步骤 2: AI 视觉定位病人[/bold cyan]")
+
+        # 1. 截取全屏
+        console.print("[dim]正在截取当前屏幕...[/dim]")
+        screenshot_path = capture_full_screen()
+
+        # 2. 调用 Claude 进行定位
+        try:
+            navigator = AINavigator()
+            console.print("[cyan]正在请求 AI 分析屏幕结构...[/cyan]")
+
+            coords = navigator.locate_emr_patient_row(screenshot_path)
+
+            if coords:
+                target_x, target_y = coords
+                console.print(f"[green]✅ AI 定位成功！目标坐标: ({target_x}, {target_y})[/green]")
+
+                # 3. 本地执行鼠标操作
+                # 移动鼠标（带平滑动画，显得更自然）
+                pyautogui.moveTo(target_x, target_y, duration=0.6, tween=pyautogui.easeInOutQuad)
+
+                # 点击
+                console.print(f"[dim]正在点击坐标 ({target_x}, {target_y})...[/dim]")
+                pyautogui.click()
+
+                # 等待页面加载（这是关键，进入详情页需要时间）
+                console.print("[dim]等待页面跳转 (3秒)...[/dim]")
+                time.sleep(3)
+
+                return True
+            else:
+                console.print("[red]❌ AI 未能在屏幕上识别到病人列表[/red]")
+                return False
+
+        except Exception as e:
+            console.print(f"[red]❌ AI 定位过程出错: {e}[/red]")
+            if DEBUG_MODE:
+                import traceback
+                console.print(traceback.format_exc())
             return False
 
     def step3_screenshot_and_extract(self) -> Dict:
@@ -628,11 +680,11 @@ class RPAWorkflow:
                 return result
             result["steps_completed"].append("step1_launch")
 
-            # 步骤 2: 查找并点击病人
-            if not self.step2_find_and_click_patient():
-                result["error"] = "步骤 2 失败: 无法找到病人"
+            # 步骤 2: AI 视觉定位并点击病人 (使用 AI 增强版)
+            if not self.step2_ai_find_and_click_patient():
+                result["error"] = "步骤 2 失败: AI 无法定位病人"
                 return result
-            result["steps_completed"].append("step2_click_patient")
+            result["steps_completed"].append("step2_ai_click")
 
             # 步骤 3: 截图并提取
             extraction_result = self.step3_screenshot_and_extract()

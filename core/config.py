@@ -18,6 +18,9 @@ load_dotenv()
 # Heidi API 基础 URL（根据官方文档调整）
 HEIDI_BASE_URL: str = os.getenv("HEIDI_BASE_URL", "https://api.heidihealth.com")
 
+# Heidi Web 界面 URL（RPA 流程中打开的页面）
+HEIDI_WEB_URL: str = os.getenv("HEIDI_WEB_URL", "https://scribe.heidihealth.com/zh/settings/account#selectedOrganizationId=null")
+
 # Heidi API Key 环境变量名称
 HEIDI_API_KEY_ENV_NAME: str = "HEIDI_API_KEY"
 
@@ -177,7 +180,8 @@ def get_config_summary() -> str:
 === EMR to Heidi Integration - 配置摘要 ===
 
 Heidi API:
-  - Base URL: {HEIDI_BASE_URL}
+  - API Base URL: {HEIDI_BASE_URL}
+  - Web URL: {HEIDI_WEB_URL}
   - API Key: {'已设置' if HEIDI_API_KEY else '未设置'}
   - Auth Email: {HEIDI_AUTH_EMAIL}
   - Auth Internal ID: {HEIDI_AUTH_INTERNAL_ID}

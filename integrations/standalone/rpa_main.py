@@ -16,7 +16,7 @@ from rich.console import Console
 from rich.panel import Panel
 
 from core.rpa_automation import RPAWorkflow
-from core.config import DEBUG_MODE
+from core.config import DEBUG_MODE, HEIDI_WEB_URL
 
 console = Console()
 
@@ -70,9 +70,9 @@ def setup_argparse() -> argparse.ArgumentParser:
     parser.add_argument(
         "--heidi-url",
         type=str,
-        default="https://www.heidihealth.com",
+        default=None,  # 使用配置文件中的默认值
         metavar="URL",
-        help="Heidi 网址（默认: https://www.heidihealth.com）"
+        help=f"Heidi 网址（默认: {HEIDI_WEB_URL}）"
     )
 
     parser.add_argument(
